@@ -65,12 +65,12 @@ $$
       <td align="middle">43</td>
     </tr>
     <tr>
-      <td align="middle">HPR-LP (v0.1.1)</td>
-      <td align="middle">27.9</td>
-      <td align="middle">48</td>
-      <td align="middle">58.4</td>
+      <td align="middle">HPR-LP (v0.1.2)</td>
+      <td align="middle">25.7</td>
+      <td align="middle">47</td>
+      <td align="middle">53.2</td>
       <td align="middle">44</td>
-      <td align="middle">90.9</td>
+      <td align="middle">82.1</td>
       <td align="middle">44</td>
     </tr>
   </tbody>
@@ -119,12 +119,12 @@ $$
       <td align="middle">14</td>
     </tr>
     <tr>
-      <td align="middle">HPR-LP (v0.1.1)</td>
-      <td align="middle">65.2</td>
+      <td align="middle">HPR-LP (v0.1.2)</td>
+      <td align="middle">60.9</td>
       <td align="middle">17</td>
-      <td align="middle">131.6</td>
+      <td align="middle">122.5</td>
       <td align="middle">17</td>
-      <td align="middle">219.3</td>
+      <td align="middle">204.2</td>
       <td align="middle">17</td>
     </tr>
   </tbody>
