@@ -103,6 +103,36 @@ mutable struct HPRLP_results
     HPRLP_results() = new()
 end
 
+# Define the CUSPARSE SpMV structure
+mutable struct CUSPARSE_spmv_A
+    handle::CUDA.CUSPARSE.cusparseHandle_t
+    operator::Char
+    alpha::Ref{Float64}
+    desc_A::CUDA.CUSPARSE.CuSparseMatrixDescriptor
+    desc_x_bar::CUDA.CUSPARSE.CuDenseVectorDescriptor
+    desc_x_hat::CUDA.CUSPARSE.CuDenseVectorDescriptor
+    desc_dx::CUDA.CUSPARSE.CuDenseVectorDescriptor
+    beta::Ref{Float64}
+    desc_Ax::CUDA.CUSPARSE.CuDenseVectorDescriptor
+    compute_type::DataType
+    alg::CUDA.CUSPARSE.cusparseSpMVAlg_t
+    buf::CuArray{UInt8}
+end
+
+mutable struct CUSPARSE_spmv_AT
+    handle::CUDA.CUSPARSE.cusparseHandle_t
+    operator::Char
+    alpha::Ref{Float64}
+    desc_AT::CUDA.CUSPARSE.CuSparseMatrixDescriptor
+    desc_y_bar::CUDA.CUSPARSE.CuDenseVectorDescriptor
+    desc_y::CUDA.CUSPARSE.CuDenseVectorDescriptor
+    beta::Ref{Float64}
+    desc_ATy::CUDA.CUSPARSE.CuDenseVectorDescriptor
+    compute_type::DataType
+    alg::CUDA.CUSPARSE.cusparseSpMVAlg_t
+    buf::CuArray{UInt8}
+end
+
 # Define the workspace for the HPR-LP algorithm
 mutable struct HPRLP_workspace_gpu
     # The vector x
@@ -138,8 +168,14 @@ mutable struct HPRLP_workspace_gpu
     # The sparse matrix A, corresponding to A in the paper, the constraints matrix
     A::CuSparseMatrixCSR{Float64,Int32}
 
+    # The CUSPARSE SpMV descriptor for A
+    spmv_A::CUSPARSE_spmv_A
+
     # The sparse matrix A^T, the transpose of A
     AT::CuSparseMatrixCSR{Float64,Int32}
+
+    # The CUSPARSE SpMV descriptor for AT
+    spmv_AT::CUSPARSE_spmv_AT
 
     # The vector AL, the coefficients of the lower bound of the constraints
     AL::CuVector{Float64}
@@ -186,8 +222,8 @@ mutable struct HPRLP_workspace_gpu
     # Normally used to store the vector y that the algorithm restarted last time
     last_y::CuVector{Float64}
 
-    # Normally used to indicate whether the vector z should be computed
-    update_z::Bool
+    # Normally used to indicate whether the termination conditions should be checked
+    to_check::Bool
 
     # Default constructor
     HPRLP_workspace_gpu() = new()
@@ -221,7 +257,7 @@ mutable struct HPRLP_workspace_cpu
     ATy::Vector{Float64}
     last_x::Vector{Float64}
     last_y::Vector{Float64}
-    update_z::Bool
+    to_check::Bool
     HPRLP_workspace_cpu() = new()
 end
 

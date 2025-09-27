@@ -51,9 +51,8 @@ The solve function is the core solver, executing the following steps:
 
 # the function to compute the M norm 
 function compute_weighted_norm_gpu(ws::HPRLP_workspace_gpu)
-    ws.dx .= ws.x_bar .- ws.x_hat
-    ws.dy .= ws.y_bar .- ws.y_hat
-    CUDA.CUSPARSE.mv!('N', 1, ws.A, ws.dx, 0, ws.Ax, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+    CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha, ws.spmv_A.desc_A, ws.spmv_A.desc_dx, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
+        ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
     dot_prod = 2 * CUDA.dot(ws.Ax, ws.dy)
     dy_squarenorm = CUDA.dot(ws.dy, ws.dy)
     dx_squarenorm = CUDA.dot(ws.dx, ws.dx)
@@ -70,8 +69,6 @@ function compute_weighted_norm_gpu(ws::HPRLP_workspace_gpu)
 end
 
 function compute_weighted_norm_cpu(ws::HPRLP_workspace_cpu)
-    ws.dx .= ws.x_bar .- ws.x_hat
-    ws.dy .= ws.y_bar .- ws.y_hat
     mul!(ws.Ax, ws.A, ws.dx)
     dot_prod = 2 * dot(ws.Ax, ws.dy)
     dy_squarenorm = dot(ws.dy, ws.dy)
@@ -367,6 +364,48 @@ function collect_results_cpu!(
     return results
 end
 
+
+# the function to prepare the spmv for a given sparse matrix A
+function prepare_spmv!(A::CuSparseMatrixCSR{Float64,Int32}, AT::CuSparseMatrixCSR{Float64,Int32}, 
+    x_bar::CuVector{Float64}, x_hat::CuVector{Float64}, dx::CuVector{Float64}, Ax::CuVector{Float64},
+    y_bar::CuVector{Float64}, y::CuVector{Float64}, ATy::CuVector{Float64})
+    desc_A = CUDA.CUSPARSE.CuSparseMatrixDescriptor(A, 'O')
+    desc_x_bar = CUDA.CUSPARSE.CuDenseVectorDescriptor(x_bar)
+    desc_x_hat = CUDA.CUSPARSE.CuDenseVectorDescriptor(x_hat)
+    desc_dx = CUDA.CUSPARSE.CuDenseVectorDescriptor(dx)
+    desc_Ax = CUDA.CUSPARSE.CuDenseVectorDescriptor(Ax)
+    desc_AT = CUDA.CUSPARSE.CuSparseMatrixDescriptor(AT, 'O')
+    desc_y_bar = CUDA.CUSPARSE.CuDenseVectorDescriptor(y_bar)
+    desc_y = CUDA.CUSPARSE.CuDenseVectorDescriptor(y)
+    desc_ATy = CUDA.CUSPARSE.CuDenseVectorDescriptor(ATy)
+    CUSPARSE_handle = CUDA.CUSPARSE.handle()
+    sz_A = Ref{Csize_t}(0)
+    ref_one = Ref{Float64}(one(Float64))
+    ref_zero = Ref{Float64}(zero(Float64))
+    CUDA.CUSPARSE.cusparseSpMV_bufferSize(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_bar, ref_zero,
+        desc_Ax, Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, sz_A)
+
+    buf_A = CUDA.CuArray{UInt8}(undef, sz_A[])
+
+    CUDA.CUSPARSE.cusparseSpMV_preprocess(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_bar, ref_zero, desc_Ax,
+        Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_A)
+
+    spmv_A = CUSPARSE_spmv_A(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_bar, desc_x_hat, desc_dx, ref_zero, desc_Ax,
+        Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_A)
+
+    sz_AT = Ref{Csize_t}(0)
+    CUDA.CUSPARSE.cusparseSpMV_bufferSize(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y_bar, ref_zero,
+        desc_ATy, Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, sz_AT)
+    buf_AT = CUDA.CuArray{UInt8}(undef, sz_AT[])
+    CUDA.CUSPARSE.cusparseSpMV_preprocess(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y_bar, ref_zero, desc_ATy,
+        Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_AT)
+    spmv_AT = CUSPARSE_spmv_AT(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y_bar, desc_y, ref_zero, desc_ATy,
+        Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_AT)
+
+    println("The SpMV operators have been prepared!")
+    return spmv_A, spmv_AT
+end
+
 # the function to allocate the workspace for the HPR-LP algorithm
 function allocate_workspace_gpu(lp::LP_info_gpu, lambda_max::Float64)
     ws = HPRLP_workspace_gpu()
@@ -397,7 +436,9 @@ function allocate_workspace_gpu(lp::LP_info_gpu, lambda_max::Float64)
     ws.Ax = CUDA.zeros(Float64, m)
     ws.last_x = CUDA.zeros(Float64, n)
     ws.last_y = CUDA.zeros(Float64, m)
-    ws.update_z = false
+    ws.to_check = false
+    ws.spmv_A, ws.spmv_AT = prepare_spmv!(lp.A, lp.AT, ws.x_bar, ws.x_hat, ws.dx, ws.Ax,
+        ws.y_bar, ws.y, ws.ATy)
     return ws
 end
 
@@ -430,7 +471,7 @@ function allocate_workspace_cpu(lp::LP_info_cpu, lambda_max::Float64)
     ws.Ax = Vector(zeros(m))
     ws.last_x = Vector(zeros(n))
     ws.last_y = Vector(zeros(m))
-    ws.update_z = false
+    ws.to_check = false
     return ws
 end
 
@@ -583,12 +624,17 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
         ### restart if needed ###
         do_restart(restart_info, ws)
 
-        ## main iteatrion ##
-        ws.update_z = rem(iter + 1, check_iter) == 0 || (rem(iter + 1, print_freq) == 0)
+        ## whether to compute bar points for residuals ##
+        ws.to_check = (rem(iter + 1, check_iter) == 0) || (restart_info.restart_flag > 0) || true
+        if print_freq == -1
+            ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter+1)) == 0)
+        elseif print_freq > 0
+            ws.to_check = ws.to_check || (rem(iter + 1, print_freq) == 0)
+        end
 
         ### update x, y,  and z ###
         fact1 = 1.0 / (restart_info.inner + 2.0)
-        fact2 = (restart_info.inner + 1.0) / (restart_info.inner + 2.0)
+        fact2 = 1.0 - fact1
         update_x_z!(ws, fact1, fact2)
         update_y!(ws, fact1, fact2)
 
