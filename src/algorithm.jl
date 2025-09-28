@@ -625,7 +625,7 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
         do_restart(restart_info, ws)
 
         ## whether to compute bar points for residuals ##
-        ws.to_check = (rem(iter + 1, check_iter) == 0) || (restart_info.restart_flag > 0) || true
+        ws.to_check = (rem(iter + 1, check_iter) == 0) || (restart_info.restart_flag > 0)
         if print_freq == -1
             ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter+1)) == 0)
         elseif print_freq > 0
