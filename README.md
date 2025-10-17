@@ -20,118 +20,6 @@ $$
 
 ---
 
-## Numerical Results on an NVIDIA A100-SXM4-80GB GPU
-
-**Numerical performance of HPR-LP and** [**cuPDLP.jl**](https://github.com/jinwen-yang/cuPDLP.jl) **(downloaded on July 24th, 2024) on 49 instances of **[**Mittelmann's LP benchmark set**](https://plato.asu.edu/ftp/lpfeas.html)** without Gurobi's presolve. Time limit 15000 seconds.**
-
-<table>
-  <thead>
-    <tr>
-      <th align="middle">Tolerance</th>
-      <th align="middle">1e-4</th>
-      <th align="middle">1e-4</th>
-      <th align="middle">1e-6</th>
-      <th align="middle">1e-6</th>
-      <th align="middle">1e-8</th>
-      <th align="middle">1e-8</th>
-    </tr>
-    <tr>
-      <th align="middle">Solvers</th>
-      <th align="middle">SGM10</th>
-      <th align="middle">Solved</th>
-      <th align="middle">SGM10</th>
-      <th align="middle">Solved</th>
-      <th align="middle">SGM10</th>
-      <th align="middle">Solved</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="middle">cuPDLP.jl</td>
-      <td align="middle">76.9</td>
-      <td align="middle">42</td>
-      <td align="middle">156.2</td>
-      <td align="middle">41</td>
-      <td align="middle">277.9</td>
-      <td align="middle">40</td>
-    </tr>
-    <tr>
-      <td align="middle">HPR-LP (v0.1.0)</td>
-      <td align="middle">30.2</td>
-      <td align="middle">47</td>
-      <td align="middle">69.1</td>
-      <td align="middle">44</td>
-      <td align="middle">103.8</td>
-      <td align="middle">43</td>
-    </tr>
-    <tr>
-      <td align="middle">HPR-LP (v0.1.2)</td>
-      <td align="middle">25.7</td>
-      <td align="middle">47</td>
-      <td align="middle">53.2</td>
-      <td align="middle">44</td>
-      <td align="middle">82.1</td>
-      <td align="middle">44</td>
-    </tr>
-  </tbody>
-</table>
-
-**Numerical performance of HPR-LP and cuPDLP.jl on 18 LP relaxations (>10M nonzeros in $A$) from **[**MIPLIB 2017**](https://miplib.zib.de/)** without Gurobi's presolve. Time limit 18000 seconds.**
-
-<table>
-  <thead>
-    <tr>
-      <th align="middle">Tolerance</th>
-      <th align="middle">1e-4</th>
-      <th align="middle">1e-4</th>
-      <th align="middle">1e-6</th>
-      <th align="middle">1e-6</th>
-      <th align="middle">1e-8</th>
-      <th align="middle">1e-8</th>
-    </tr>
-    <tr>
-      <th align="middle">Solvers</th>
-      <th align="middle">SGM10</th>
-      <th align="middle">Solved</th>
-      <th align="middle">SGM10</th>
-      <th align="middle">Solved</th>
-      <th align="middle">SGM10</th>
-      <th align="middle">Solved</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="middle">cuPDLP.jl</td>
-      <td align="middle">129.8</td>
-      <td align="middle">16</td>
-      <td align="middle">253.3</td>
-      <td align="middle">15</td>
-      <td align="middle">442.2</td>
-      <td align="middle">14</td>
-    </tr>
-    <tr>
-      <td align="middle">HPR-LP (v0.1.0)</td>
-      <td align="middle">117.6</td>
-      <td align="middle">17</td>
-      <td align="middle">260.7</td>
-      <td align="middle">15</td>
-      <td align="middle">428.6</td>
-      <td align="middle">14</td>
-    </tr>
-    <tr>
-      <td align="middle">HPR-LP (v0.1.2)</td>
-      <td align="middle">60.9</td>
-      <td align="middle">17</td>
-      <td align="middle">122.5</td>
-      <td align="middle">17</td>
-      <td align="middle">204.2</td>
-      <td align="middle">17</td>
-    </tr>
-  </tbody>
-</table>
-
----
-
 # Getting Started
 
 ## Prerequisites
@@ -259,9 +147,9 @@ Below is a list of the parameters in HPR-LP along with their default values and 
     </tr>
   </thead>
   <tbody>
-    <tr><td><code>warm_up</code></td><td><code>false</code></td><td>Determines if a warm-up phase is performed before main execution.</td></tr>
+    <tr><td><code>warm_up</code></td><td><code>true</code></td><td>Determines if a warm-up phase is performed before main execution.</td></tr>
     <tr><td><code>time_limit</code></td><td><code>3600</code></td><td>Maximum allowed runtime (seconds) for the algorithm.</td></tr>
-    <tr><td><code>stoptol</code></td><td><code>1e-6</code></td><td>Stopping tolerance for convergence checks.</td></tr>
+    <tr><td><code>stoptol</code></td><td><code>1e-4</code></td><td>Stopping tolerance for convergence checks.</td></tr>
     <tr><td><code>device_number</code></td><td><code>0</code></td><td>GPU device number (only relevant if <code>use_gpu</code> is true).</td></tr>
     <tr><td><code>max_iter</code></td><td><code>typemax(Int32)</code></td><td>Maximum number of iterations allowed.</td></tr>
     <tr><td><code>check_iter</code></td><td><code>150</code></td><td>Number of iterations to check residuals.</td></tr>
@@ -298,9 +186,11 @@ println("x2 = ", result.x[2])
     <tr><td><b>Iteration Counts</b></td><td><code>iter</code></td><td>Total number of iterations performed by the algorithm.</td></tr>
     <tr><td></td><td><code>iter_4</code></td><td>Number of iterations required to achieve an accuracy of 1e-4.</td></tr>
     <tr><td></td><td><code>iter_6</code></td><td>Number of iterations required to achieve an accuracy of 1e-6.</td></tr>
+    <tr><td></td><td><code>iter_8</code></td><td>Number of iterations required to achieve an accuracy of 1e-8.</td></tr>
     <tr><td><b>Time Metrics</b></td><td><code>time</code></td><td>Total time in seconds taken by the algorithm.</td></tr>
     <tr><td></td><td><code>time_4</code></td><td>Time in seconds taken to achieve an accuracy of 1e-4.</td></tr>
     <tr><td></td><td><code>time_6</code></td><td>Time in seconds taken to achieve an accuracy of 1e-6.</td></tr>
+    <tr><td></td><td><code>time_8</code></td><td>Time in seconds taken to achieve an accuracy of 1e-8.</td></tr>
     <tr><td></td><td><code>power_time</code></td><td>Time in seconds used by the power method.</td></tr>
     <tr><td><b>Objective Values</b></td><td><code>primal_obj</code></td><td>The primal objective value obtained.</td></tr>
     <tr><td></td><td><code>gap</code></td><td>The gap between the primal and dual objective values.</td></tr>

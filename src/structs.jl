@@ -47,7 +47,7 @@ mutable struct HPRLP_parameters
     print_frequency::Int
 
     # Default constructor
-    HPRLP_parameters() = new(1e-6, typemax(Int32), 3600.0, 150, true, true, true, true, 0, false, -1)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, 0, true, -1)
 end
 
 
@@ -62,6 +62,9 @@ mutable struct HPRLP_results
     # Number of iterations for the 1e-6 accuracy
     iter_6::Int
 
+    # Number of iterations for the 1e-8 accuracy
+    iter_8::Int
+
     # Time in seconds
     time::Float64
 
@@ -70,6 +73,9 @@ mutable struct HPRLP_results
 
     # Time in seconds for the 1e-6 accuracy
     time_6::Float64
+
+    # Time in seconds for the 1e-8 accuracy
+    time_8::Float64
 
     # Time used by power method
     power_time::Float64
@@ -277,9 +283,6 @@ mutable struct HPRLP_residuals
 
     # The relative gap evaluated at x_bar, y_bar, and z_bar
     rel_gap_bar::Float64
-
-    # indicate whether the residuals are updated
-    is_updated::Bool
 
     # The maximum of the primal feasibility, dual feasibility, and duality gap
     KKTx_and_gap_org_bar::Float64

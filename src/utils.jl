@@ -50,10 +50,7 @@ function scaling!(lp::LP_info_cpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_sc
     AU_nInf[lp.AU.==Inf] .= 0.0
     norm_b_org = 1 + norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
     norm_c_org = 1 + norm(lp.c)
-    # norm_b_org = 5.42181966531778
     scaling_info = Scaling_info_cpu(copy(lp.l), copy(lp.u), row_norm, col_norm, 1, 1, 1, 1, norm_b_org, norm_c_org)
-    println("norm_b_org: ", norm_b_org)
-    println("norm_c_org: ", norm_c_org)
     # Ruiz scaling
     if use_Ruiz_scaling
         for _ in 1:10
@@ -123,20 +120,23 @@ function scaling!(lp::LP_info_cpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_sc
     return scaling_info
 end
 
-# the function to compute the maximum eigenvalue of the matrix AA^T
-function power_iteration_gpu(A::CuSparseMatrixCSR, AT::CuSparseMatrixCSR,
+function power_iteration_gpu(spmv_A::CUSPARSE_spmv_A, spmv_AT::CUSPARSE_spmv_AT, m::Int, n::Int,
     max_iterations::Int=5000, tolerance::Float64=1e-4)
     seed = 1
-    m, n = size(A)
     z = CuVector(randn(Random.MersenneTwister(seed), m)) .+ 1e-8 # Initial random vector
     q = CUDA.zeros(Float64, m)
     ATq = CUDA.zeros(Float64, n)
-    lambda_max = 1
+    desc_q = CUDA.CUSPARSE.CuDenseVectorDescriptor(q)
+    desc_z = CUDA.CUSPARSE.CuDenseVectorDescriptor(z)
+    desc_ATq = CUDA.CUSPARSE.CuDenseVectorDescriptor(ATq)
+    lambda_max = 1.0
     for i in 1:max_iterations
         q .= z
         q ./= CUDA.norm(q)
-        CUDA.CUSPARSE.mv!('N', 1, AT, q, 0, ATq, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
-        CUDA.CUSPARSE.mv!('N', 1, A, ATq, 0, z, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
+        CUDA.CUSPARSE.cusparseSpMV(spmv_AT.handle, spmv_AT.operator, spmv_AT.alpha, spmv_AT.desc_AT, desc_q, spmv_AT.beta, desc_ATq,
+        spmv_AT.compute_type, spmv_AT.alg, spmv_AT.buf)
+        CUDA.CUSPARSE.cusparseSpMV(spmv_A.handle, spmv_A.operator, spmv_A.alpha, spmv_A.desc_A, desc_ATq, spmv_A.beta, desc_z,
+        spmv_A.compute_type, spmv_A.alg, spmv_A.buf)
         lambda_max = CUDA.dot(q, z)
         q .= z .- lambda_max .* q
         if CUDA.norm(q) < tolerance
@@ -251,7 +251,7 @@ function run_lp(A::SparseMatrixCSC,
     u::Vector{Float64},
     obj_constant::Float64,
     params::HPRLP_parameters)
-
+    
     if params.warm_up
         println("warm up starts: ---------------------------------------------------------------------------------------------------------- ")
         t_start_all = time()
@@ -278,7 +278,6 @@ function run_Abc(A::SparseMatrixCSC,
     u::Vector{Float64},
     obj_constant::Float64,
     params::HPRLP_parameters)
-
     A = copy(A)
     c = copy(c)
     AL = copy(AL)
@@ -339,7 +338,6 @@ end
 
 # the function to test the HPR-LP algorithm on a dataset
 function run_dataset(data_path::String, result_path::String, params::HPRLP_parameters)
-
     files = readdir(data_path)
 
     # Specify the path and filename for the CSV file
@@ -367,6 +365,8 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
         time4list = Vector{Any}(result_table.time_4[1:end-2])
         iter6list = Vector{Any}(result_table.iter_6[1:end-2])
         time6list = Vector{Any}(result_table.time_6[1:end-2])
+        iter8list = Vector{Any}(result_table.iter_8[1:end-2])
+        time8list = Vector{Any}(result_table.time_8[1:end-2])
     else
         namelist = []
         iterlist = []
@@ -378,6 +378,8 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
         time4list = []
         iter6list = []
         time6list = []
+        iter8list = []
+        time8list = []
     end
 
 
@@ -431,6 +433,8 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                 push!(time4list, min(results.time_4, params.time_limit))
                 push!(iter6list, results.iter_6)
                 push!(time6list, min(results.time_6, params.time_limit))
+                push!(iter8list, results.iter_8)
+                push!(time8list, min(results.time_8, params.time_limit))
             end
 
             result_table = DataFrame(name=namelist,
@@ -443,21 +447,26 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                 time_4=time4list,
                 iter_6=iter6list,
                 time_6=time6list,
+                iter_8=iter8list,
+                time_8=time8list
             )
 
             # compute the shifted geometric mean of the algorithm_time, put it in the last row
             geomean_time = exp(mean(log.(timelist .+ 10.0))) - 10.0
             geomean_time_4 = exp(mean(log.(time4list .+ 10.0))) - 10.0
             geomean_time_6 = exp(mean(log.(time6list .+ 10.0))) - 10.0
+            geomean_time_8 = exp(mean(log.(time8list .+ 10.0))) - 10.0
             geomean_iter = exp(mean(log.(iterlist .+ 10.0))) - 10.0
             geomean_iter_4 = exp(mean(log.(iter4list .+ 10.0))) - 10.0
             geomean_iter_6 = exp(mean(log.(iter6list .+ 10.0))) - 10.0
-            push!(result_table, ["SGM10", geomean_iter, geomean_time, "", "", "", geomean_iter_4, geomean_time_4, geomean_iter_6, geomean_time_6])
+            geomean_iter_8 = exp(mean(log.(iter8list .+ 10.0))) - 10.0
+            push!(result_table, ["SGM10", geomean_iter, geomean_time, "", "", "", geomean_iter_4, geomean_time_4, geomean_iter_6, geomean_time_6, geomean_iter_8, geomean_time_8])
             # count the number of solved instances, termlist = "OPTIMAL" means solved
             solved = count(x -> x < params.time_limit, timelist)
             solved_4 = count(x -> x < params.time_limit, time4list)
             solved_6 = count(x -> x < params.time_limit, time6list)
-            push!(result_table, ["solved", "", solved, "", "", "", "", solved_4, "", solved_6])
+            solved_8 = count(x -> x < params.time_limit, time8list)
+            push!(result_table, ["solved", "", solved, "", "", "", "", solved_4, "", solved_6, "", solved_8])
 
             CSV.write(csv_file, result_table)
         end
@@ -469,7 +478,6 @@ end
 
 # the function to test the HPR-LP algorithm on a single file
 function run_single(file_name::String, params::HPRLP_parameters)
-
     println("data path: ", file_name)
 
     if occursin(".mps", file_name)
@@ -493,4 +501,81 @@ function run_single(file_name::String, params::HPRLP_parameters)
     end
 
     return results
+end
+
+
+# Define the product of sets at module level (required for struct definition)
+MOI.Utilities.@product_of_sets(
+    LPSets,
+    MOI.EqualTo{T},
+    MOI.LessThan{T},
+    MOI.GreaterThan{T},
+    MOI.Interval{T},
+)
+
+# Define the cache type with MatrixOfConstraints (same approach as Clp.jl)
+const OptimizerCache = MOI.Utilities.GenericModel{
+    Float64,
+    MOI.Utilities.ObjectiveContainer{Float64},
+    MOI.Utilities.VariablesContainer{Float64},
+    MOI.Utilities.MatrixOfConstraints{
+        Float64,
+        MOI.Utilities.MutableSparseMatrixCSC{
+            Float64,
+            Int,
+            MOI.Utilities.OneBasedIndexing,
+        },
+        MOI.Utilities.Hyperrectangle{Float64},
+        LPSets{Float64},
+    },
+}
+
+# Helper function to extract LP data from JuMP model
+# This uses MOI's MatrixOfConstraints for efficient matrix extraction
+function extract_lp_data(model::Model)
+    # Get the backend MOI model
+    moi_backend = backend(model)
+    
+    # Extract objective function from JuMP model
+    obj = MOI.get(moi_backend, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}())
+    sense = MOI.get(moi_backend, MOI.ObjectiveSense())
+    
+    # Create cache and copy model for constraint matrix
+    cache = OptimizerCache()
+    MOI.copy_to(cache, moi_backend)
+    
+    # Extract sparse matrix and bounds from cache
+    A = cache.constraints.coefficients
+    row_bounds = cache.constraints.constants
+    
+    # Convert bounds from sets to vectors
+    AL = row_bounds.lower
+    AU = row_bounds.upper
+    
+    # Extract variable bounds
+    l = cache.variables.lower
+    u = cache.variables.upper
+    
+    # Convert objective to coefficient vector using sparse vector
+    indices = [term.variable.value for term in obj.terms]
+    values = [term.coefficient for term in obj.terms]
+    c = Vector(sparsevec(indices, values, A.n)) 
+    obj_constant = obj.constant
+    
+    # Handle maximization
+    if sense == MOI.MAX_SENSE
+        c = -c
+        obj_constant = -obj_constant
+    end
+    
+    # Convert to standard Julia SparseMatrixCSC
+    A_sparse = SparseMatrixCSC(A.m, A.n, A.colptr, A.rowval, A.nzval)
+    
+    return A_sparse, AL, AU, c, l, u, obj_constant
+end
+
+function run_JuMP_model(model::Model, params::HPRLP_parameters)
+    A, AL, AU, c, l, u, obj_constant = extract_lp_data(model)
+    HPRLP_result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+    return HPRLP_result
 end

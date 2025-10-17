@@ -11,6 +11,7 @@ using DataFrames
 using Random
 using Statistics
 using Logging
+using JuMP
 
 include("structs.jl")
 include("utils.jl")
