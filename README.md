@@ -204,13 +204,8 @@ println("x2 = ", result.x[2])
 
 ---
 
-## Citation
+## Reference
 
-```bibtex
-@article{chen2024hpr,
-  title={HPR-LP: An implementation of an HPR method for solving linear programming},
-  author={Chen, Kaihuang and Sun, Defeng and Yuan, Yancheng and Zhang, Guojun and Zhao, Xinyuan},
-  journal={arXiv preprint arXiv:2408.12179},
-  year={2024}
-}
-```
+Kaihuang Chen, [Defeng Sun](https://www.polyu.edu.hk/ama/profile/dfsun//), [Yancheng Yuan](https://www.polyu.edu.hk/ama/people/academic-staff/dr-yuan-yancheng/?sc_lang=en), Guojun Zhang, and [Xinyuan Zhao](https://scholar.google.com/citations?user=nFG8lEYAAAAJ&hl=en), “[HPR-LP: An implementation of an HPR method for solving linear programming](https://www.polyu.edu.hk/ama/profile/dfsun//files/HPR-LP_Published2025.pdf)”, arXiv:2408.12179 (August 2024), [Mathematical Programming Computation](https://link.springer.com/journal/12532) 17 (2025), doi.org/10.1007/s12532-025-00292-0.
+
+
