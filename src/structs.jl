@@ -317,9 +317,6 @@ mutable struct HPRLP_restart
     # the number of inner iterations, t in the paper
     inner::Int
 
-    # the number of restart step length for fixed step restart
-    step::Int
-
     # the number of restart triggered by sufficient decrease
     sufficient::Int
 
@@ -329,14 +326,8 @@ mutable struct HPRLP_restart
     # the number of restart triggered by long iterations
     long::Int
 
-    # the ratio of ||Δx|| and ||Δy||
-    ratio::Int
-
     # the number of restart
     times::Int
-
-    # the value of M-norm 
-    weighted_norm::Float64
 
     # Default constructor
     HPRLP_restart() = new()

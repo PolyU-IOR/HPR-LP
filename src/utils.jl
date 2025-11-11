@@ -341,10 +341,10 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
     files = readdir(data_path)
 
     # Specify the path and filename for the CSV file
-    csv_file = result_path * "HPRLP_result.csv"
+    csv_file = joinpath(result_path, "HPRLP_result.csv")
 
     # redirect the output to a file
-    log_path = result_path * "HPRLP_log.txt"
+    log_path = joinpath(result_path, "HPRLP_log.txt")
 
     if !isdir(result_path)
         mkdir(result_path)
@@ -390,7 +390,7 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
             println("The result of problem exists: ", file)
         end
         if occursin(".mps", file) && !(file in namelist)
-            FILE_NAME = data_path * file
+            FILE_NAME = joinpath(data_path, file)
             println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
             # println(file)
 

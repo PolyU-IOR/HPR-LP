@@ -518,9 +518,7 @@ function initialize_restart(sigma::Float64)
     restart_info.sufficient = 0
     restart_info.necessary = 0
     restart_info.long = 0
-    restart_info.ratio = 0
     restart_info.restart_flag = 0
-    restart_info.weighted_norm = Inf
     return restart_info
 end
 
