@@ -1,4 +1,4 @@
-module HPRLP
+module Hprlp
 
 using SparseArrays
 using LinearAlgebra
