@@ -6,9 +6,9 @@ HPRLP integrates seamlessly with JuMP through the MathOptInterface (MOI), allowi
 
 ```julia
 using JuMP
-using HPRLP
+using HprLP
 
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 
 @variable(model, x >= 0)
 @variable(model, y >= 0)
@@ -27,7 +27,7 @@ println("x = ", value(x), ", y = ", value(y))
 ### Using `set_optimizer_attribute`
 
 ```julia
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 
 # Standard MOI attributes
 set_silent(model)                      # Suppress output
@@ -102,7 +102,7 @@ println("Solved in $time seconds")
 Suppress all solver output:
 
 ```julia
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 set_silent(model)
 
 # Build model...
@@ -113,7 +113,7 @@ optimize!(model)
 Or equivalently:
 
 ```julia
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 set_optimizer_attribute(model, "verbose", false)
 optimize!(model)
 ```
@@ -123,7 +123,7 @@ optimize!(model)
 ### Production Portfolio
 
 ```julia
-using JuMP, HPRLP
+using JuMP, HprLP
 
 # Production planning
 products = 1:5
@@ -133,7 +133,7 @@ profit = rand(5) .* 10
 resource_usage = rand(3, 5)
 resource_capacity = rand(3) .* 100
 
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 set_silent(model)
 
 @variable(model, production[products] >= 0)
@@ -159,7 +159,7 @@ end
 ### Network Flow
 
 ```julia
-using JuMP, HPRLP
+using JuMP, HprLP
 
 # Simple network flow
 nodes = 1:5
@@ -167,7 +167,7 @@ arcs = [(1,2), (1,3), (2,4), (3,4), (4,5)]
 capacity = Dict(arcs .=> rand(length(arcs)) .* 10)
 supply = [10.0, 0, 0, 0, -10]  # Source at 1, sink at 5
 
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 set_silent(model)
 
 @variable(model, 0 <= flow[a in arcs] <= capacity[a])
@@ -198,7 +198,7 @@ end
 ### Diet Problem
 
 ```julia
-using JuMP, HPRLP
+using JuMP, HprLP
 
 # Classic diet problem
 foods = ["Bread", "Milk", "Eggs", "Meat", "Cake"]
@@ -212,7 +212,7 @@ nutrition = [
 ]
 min_nutrient = [2000, 50, 30]  # Daily requirements
 
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 set_silent(model)
 
 @variable(model, servings[1:5] >= 0)
@@ -241,7 +241,7 @@ end
 Enable GPU for large models:
 
 ```julia
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 set_optimizer_attribute(model, "use_gpu", true)
 set_optimizer_attribute(model, "device_number", 0)
 
@@ -256,7 +256,7 @@ optimize!(model)
 JuMP automatically handles maximization:
 
 ```julia
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 
 @variable(model, x >= 0)
 @variable(model, y >= 0)
@@ -274,7 +274,7 @@ println("Maximum value: ", objective_value(model))
 ## Error Handling
 
 ```julia
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 
 # Build model...
 
@@ -299,10 +299,10 @@ end
 You can read MPS files and solve them with HPRLP via JuMP:
 
 ```julia
-using JuMP, HPRLP
+using JuMP, HprLP
 
 model = read_from_file("problem.mps")
-set_optimizer(model, HPRLP.Optimizer)
+set_optimizer(model, HprLP.Optimizer)
 
 # Set attributes
 set_silent(model)
@@ -322,7 +322,7 @@ end
 Easy to switch between solvers:
 
 ```julia
-using JuMP, HPRLP, HiGHS
+using JuMP, HprLP, HiGHS
 
 # Build model
 function build_model()
@@ -337,7 +337,7 @@ end
 
 # Solve with HPRLP
 model1 = build_model()
-set_optimizer(model1, HPRLP.Optimizer)
+set_optimizer(model1, HprLP.Optimizer)
 set_silent(model1)
 optimize!(model1)
 println("HPRLP: ", objective_value(model1))

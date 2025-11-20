@@ -83,7 +83,7 @@ println("Residuals: ", result.residuals)
 ### Optimizer
 
 ```@docs
-HPRLP.Optimizer
+HprLP.Optimizer
 ```
 
 The `Optimizer` type implements the MathOptInterface (MOI) for integration with JuMP and other optimization modeling frameworks.
@@ -101,9 +101,9 @@ The `Optimizer` type implements the MathOptInterface (MOI) for integration with 
 All fields from `HPRLP_parameters` can be set as raw optimizer attributes:
 
 ```julia
-using JuMP, HPRLP
+using JuMP, HprLP
 
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 
 # Standard MOI attributes
 set_silent(model)

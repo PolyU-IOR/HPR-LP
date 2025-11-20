@@ -43,7 +43,7 @@ where:
 
 ```julia
 using Pkg
-Pkg.add("HPRLP")  # Once registered
+Pkg.add("HprLP")  # Once registered
 ```
 
 Or from GitHub:
@@ -55,7 +55,7 @@ Pkg.add(url="https://github.com/PolyU-IOR/HPR-LP")
 ### Simple Example
 
 ```julia
-using HPRLP
+using HprLP
 using SparseArrays
 
 # Define LP: min -3x₁ - 5x₂ s.t. x₁ + 2x₂ ≤ 10, 3x₁ + x₂ ≤ 12, x ≥ 0
@@ -79,9 +79,9 @@ println("Solution: x = ", result.x)
 ### With JuMP
 
 ```julia
-using JuMP, HPRLP
+using JuMP, HprLP
 
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 set_silent(model)  # Optional: suppress output
 
 @variable(model, x1 >= 0)
