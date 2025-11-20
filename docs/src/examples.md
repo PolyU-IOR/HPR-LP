@@ -7,7 +7,7 @@ This page provides complete, runnable examples demonstrating various use cases o
 Solve a simple 2-variable LP problem.
 
 ```julia
-using HprLP
+using HPRLP
 using SparseArrays
 
 # Problem:
@@ -44,7 +44,7 @@ println("Time: ", result.time, " seconds")
 Read and solve a problem from an MPS file.
 
 ```julia
-using HprLP
+using HPRLP
 
 # Configure solver
 params = HPRLP_parameters()
@@ -74,10 +74,10 @@ end
 Build and solve using JuMP's modeling language.
 
 ```julia
-using JuMP, HprLP
+using JuMP, HPRLP
 
 # Create model
-model = Model(HprLP.Optimizer)
+model = Model(HPRLP.Optimizer)
 set_optimizer_attribute(model, "stoptol", 1e-4)
 set_optimizer_attribute(model, "use_gpu", false)
 
@@ -104,7 +104,7 @@ println("Solve time: ", solve_time(model), " seconds")
 A realistic production planning problem.
 
 ```julia
-using JuMP, HprLP
+using JuMP, HPRLP
 
 # Problem data
 n_products = 10
@@ -126,7 +126,7 @@ resource_usage = [
 capacity = [100, 80, 120, 90, 110]
 
 # Build model
-model = Model(HprLP.Optimizer)
+model = Model(HPRLP.Optimizer)
 set_silent(model)
 
 @variable(model, production[1:n_products] >= 0)
@@ -161,7 +161,7 @@ end
 Classical transportation problem.
 
 ```julia
-using JuMP, HprLP
+using JuMP, HPRLP
 
 # Supply at each factory
 factories = 1:3
@@ -179,7 +179,7 @@ cost = [
 ]
 
 # Build model
-model = Model(HprLP.Optimizer)
+model = Model(HPRLP.Optimizer)
 set_silent(model)
 
 @variable(model, ship[f in factories, w in warehouses] >= 0)
@@ -220,7 +220,7 @@ end
 Simple portfolio selection problem.
 
 ```julia
-using HprLP
+using HPRLP
 using SparseArrays
 using LinearAlgebra
 
@@ -272,7 +272,7 @@ end
 Solve multiple problems in batch.
 
 ```julia
-using HprLP
+using HPRLP
 
 function solve_batch_problems(files::Vector{String}, output_csv::String)
     # Setup
@@ -337,7 +337,7 @@ results = solve_batch_problems(files, "results.csv")
 Compare HPRLP with other solvers.
 
 ```julia
-using JuMP, HprLP, HiGHS
+using JuMP, HPRLP, HiGHS
 using BenchmarkTools
 
 function build_test_problem()
@@ -361,7 +361,7 @@ end
 
 # Test HPRLP (CPU)
 model1 = build_test_problem()
-set_optimizer(model1, HprLP.Optimizer)
+set_optimizer(model1, HPRLP.Optimizer)
 set_silent(model1)
 set_optimizer_attribute(model1, "use_gpu", false)
 @time optimize!(model1)
@@ -369,7 +369,7 @@ println("HPRLP (CPU): ", objective_value(model1))
 
 # Test HPRLP (GPU)
 model2 = build_test_problem()
-set_optimizer(model2, HprLP.Optimizer)
+set_optimizer(model2, HPRLP.Optimizer)
 set_silent(model2)
 set_optimizer_attribute(model2, "use_gpu", true)
 @time optimize!(model2)
@@ -388,7 +388,7 @@ println("HiGHS: ", objective_value(model3))
 Demonstrate warm-up benefit.
 
 ```julia
-using HprLP
+using HPRLP
 using SparseArrays
 
 # Problem definition
@@ -431,7 +431,7 @@ All examples can be run directly after installing HPRLP:
 
 ```julia
 using Pkg
-Pkg.add("HprLP")  # or add from GitHub
+Pkg.add("HPRLP")  # or add from GitHub
 
 # Copy and paste any example above
 # ...

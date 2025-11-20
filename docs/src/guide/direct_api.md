@@ -5,7 +5,7 @@ The direct API allows you to solve LP problems by passing matrices and vectors d
 ## Basic Example
 
 ```julia
-using HprLP
+using HPRLP
 using SparseArrays
 
 # Problem: min -3x₁ - 5x₂
@@ -93,7 +93,7 @@ Standard form:
 ## Complete Example with All Constraint Types
 
 ```julia
-using HprLP
+using HPRLP
 using SparseArrays
 
 # Problem with mixed constraints:
@@ -311,7 +311,7 @@ result = run_lp(A, AL, AU, c, l, u, 0.0, params)
 ## Example: Portfolio Optimization
 
 ```julia
-using HprLP
+using HPRLP
 using SparseArrays
 
 # Simple portfolio optimization

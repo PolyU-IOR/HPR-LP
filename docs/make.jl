@@ -1,5 +1,5 @@
 using Documenter
-using HprLP
+using HPRLP
 
 makedocs(
     sitename = "HPRLP.jl",
@@ -8,7 +8,7 @@ makedocs(
         canonical = "https://PolyU-IOR.github.io/HPR-LP",
         assets = String[],
     ),
-    modules = [HprLP],
+    modules = [HPRLP],
     pages = [
         "Home" => "index.md",
         "Getting Started" => "getting_started.md",

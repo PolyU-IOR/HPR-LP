@@ -5,7 +5,7 @@ HPRLP can directly read and solve linear programming problems in MPS (Mathematic
 ## Quick Start
 
 ```julia
-using HprLP
+using HPRLP
 
 # Configure solver parameters
 params = HPRLP_parameters()
@@ -72,7 +72,7 @@ This represents:
 ### Basic Usage
 
 ```julia
-using HprLP
+using HPRLP
 
 # Simple solve with defaults
 params = HPRLP_parameters()
@@ -146,7 +146,7 @@ result3 = run_single("problem3.mps", params)
 Process multiple MPS files:
 
 ```julia
-using HprLP
+using HPRLP
 
 function solve_batch(files::Vector{String}, params::HPRLP_parameters)
     results = Dict{String, HprLP_results}()

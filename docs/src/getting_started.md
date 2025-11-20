@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Before using HprLP, ensure you have:
+Before using HPRLP, ensure you have:
 
 - **Julia** (version 1.10 or higher recommended)
 - **CUDA** (optional, for GPU acceleration)
@@ -15,7 +15,7 @@ Before using HprLP, ensure you have:
 
 ```julia
 using Pkg
-Pkg.add("HprLP")
+Pkg.add("HPRLP")
 ```
 
 ### From GitHub
@@ -44,7 +44,7 @@ using CUDA
 CUDA.versioninfo()
 ```
 
-If CUDA is not available, HprLP will automatically fall back to CPU mode.
+If CUDA is not available, HPRLP will automatically fall back to CPU mode.
 
 ## First Example: Solving a Simple LP
 
@@ -62,7 +62,7 @@ Let's solve a basic linear programming problem:
 ### Using the Direct API
 
 ```julia
-using HprLP
+using HPRLP
 using SparseArrays
 
 # Convert to standard form: AL ≤ Ax ≤ AU
@@ -103,9 +103,9 @@ The same problem using the JuMP modeling interface:
 
 ```julia
 using JuMP
-using HprLP
+using HPRLP
 
-model = Model(HprLP.Optimizer)
+model = Model(HPRLP.Optimizer)
 
 # Set optimizer attributes
 set_optimizer_attribute(model, "stoptol", 1e-4)
