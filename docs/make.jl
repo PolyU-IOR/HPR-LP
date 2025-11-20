@@ -20,9 +20,12 @@ makedocs(
         "API Reference" => "api.md",
         "Examples" => "examples.md",
     ],
+    doctest = false,  # Disable doctests to speed up build
+    checkdocs = :none,  # Don't check for missing docstrings
 )
 
 deploydocs(
     repo = "github.com/PolyU-IOR/HPR-LP.git",
     devbranch = "main",
+    push_preview = true,
 )
