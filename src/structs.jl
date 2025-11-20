@@ -11,7 +11,33 @@ Data Structures
 
 =#
 
-# the space for the parameters of the HPR-LP algorithm
+"""
+    HPRLP_parameters
+
+Parameters for the HPR-LP solver.
+
+# Fields
+- `stoptol::Float64`: Stopping tolerance (default: 1e-4)
+- `max_iter::Int`: Maximum number of iterations (default: typemax(Int32))
+- `time_limit::Float64`: Time limit in seconds (default: 3600.0)
+- `check_iter::Int`: Interval for residual checks (default: 150)
+- `use_Ruiz_scaling::Bool`: Enable Ruiz scaling (default: true)
+- `use_Pock_Chambolle_scaling::Bool`: Enable Pock-Chambolle scaling (default: true)
+- `use_bc_scaling::Bool`: Enable b/c scaling (default: true)
+- `use_gpu::Bool`: Use GPU acceleration (default: true)
+- `device_number::Int`: GPU device number (default: 0)
+- `warm_up::Bool`: Enable warm-up phase (default: true)
+- `print_frequency::Int`: Print log every N iterations, -1 for auto (default: -1)
+- `verbose::Bool`: Enable verbose output (default: true)
+
+# Example
+```julia
+params = HPRLP_parameters()
+params.stoptol = 1e-6
+params.use_gpu = false
+params.verbose = false
+```
+"""
 mutable struct HPRLP_parameters
     # the stopping tolerance, default is 1e-6
     stoptol::Float64
@@ -46,12 +72,43 @@ mutable struct HPRLP_parameters
     # print frequency, print the log every print_frequency iterations, default is -1 (auto)
     print_frequency::Int
 
+    # whether to print verbose output, default is true
+    verbose::Bool
+
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, 0, true, -1)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, 0, true, -1, true)
 end
 
+"""
+    HPRLP_results
 
-# Define the results will be returned
+Results from the HPR-LP solver.
+
+# Fields
+- `iter::Int`: Total number of iterations
+- `iter_4::Int`: Iterations to reach 1e-4 accuracy
+- `iter_6::Int`: Iterations to reach 1e-6 accuracy
+- `iter_8::Int`: Iterations to reach 1e-8 accuracy
+- `time::Float64`: Total solve time in seconds
+- `time_4::Float64`: Time to reach 1e-4 accuracy
+- `time_6::Float64`: Time to reach 1e-6 accuracy
+- `time_8::Float64`: Time to reach 1e-8 accuracy
+- `primal_obj::Float64`: Primal objective value
+- `dual_obj::Float64`: Dual objective value
+- `primal_residual::Float64`: Final primal feasibility residual
+- `dual_residual::Float64`: Final dual feasibility residual
+- `relative_duality_gap::Float64`: Final relative duality gap
+- `x::Vector{Float64}`: Primal solution vector
+- `status::String`: Termination status ("Optimal", "TimeLimit", "IterationLimit")
+
+# Example
+```julia
+results = run_lp(A, b, c, l, u)
+println("Status: ", results.status)
+println("Objective: ", results.primal_obj)
+println("Time: ", results.time, " seconds")
+```
+"""
 mutable struct HPRLP_results
     # Number of iterations
     iter::Int

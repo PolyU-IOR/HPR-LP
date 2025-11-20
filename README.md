@@ -27,7 +27,7 @@ $$
 Before using HPR-LP, make sure the following dependencies are installed:
 
 - **Julia** (Recommended version: `1.10.4`)
-- **CUDA** (Required for GPU acceleration; install the appropriate version for your GPU and Julia)
+- **CUDA** (Required for GPU acceleration; install the appropriate version for your GPU and Julia, >= 12.4 recommended)
 - Required Julia packages
 
 > To install the required Julia packages and build the HPR-LP environment, run:
@@ -158,6 +158,7 @@ Below is a list of the parameters in HPR-LP along with their default values and 
     <tr><td><code>use_bc_scaling</code></td><td><code>true</code></td><td>Whether to use the scaling for b and c.</td></tr>
     <tr><td><code>use_gpu</code></td><td><code>true</code></td><td>Whether to use GPU or not.</td></tr>
     <tr><td><code>print_frequency</code></td><td><code>-1</code> (auto)</td><td>Print the log every <code>print_frequency</code> iterations.</td></tr>
+    <tr><td><code>verbose</code></td><td><code>true</code></td><td>Whether to print solver output. Set to <code>false</code> for silent mode.</td></tr>
   </tbody>
 </table>
 

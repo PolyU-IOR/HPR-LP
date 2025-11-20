@@ -409,8 +409,11 @@ function prepare_spmv!(A::CuSparseMatrixCSR{Float64,Int32}, AT::CuSparseMatrixCS
 
     buf_A = CUDA.CuArray{UInt8}(undef, sz_A[])
 
-    CUDA.CUSPARSE.cusparseSpMV_preprocess(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_bar, ref_zero, desc_Ax,
-        Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_A)
+    # Only call preprocess for CUDA >= 12.4
+    if CUDA.CUSPARSE.version() >= v"12.4"
+        CUDA.CUSPARSE.cusparseSpMV_preprocess(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_bar, ref_zero, desc_Ax,
+            Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_A)
+    end
 
     spmv_A = CUSPARSE_spmv_A(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_bar, desc_x_hat, desc_dx, ref_zero, desc_Ax,
         Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_A)
@@ -419,8 +422,11 @@ function prepare_spmv!(A::CuSparseMatrixCSR{Float64,Int32}, AT::CuSparseMatrixCS
     CUDA.CUSPARSE.cusparseSpMV_bufferSize(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y_bar, ref_zero,
         desc_ATy, Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, sz_AT)
     buf_AT = CUDA.CuArray{UInt8}(undef, sz_AT[])
-    CUDA.CUSPARSE.cusparseSpMV_preprocess(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y_bar, ref_zero, desc_ATy,
-        Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_AT)
+    # Only call preprocess for CUDA >= 12.4
+    if CUDA.CUSPARSE.version() >= v"12.4"
+        CUDA.CUSPARSE.cusparseSpMV_preprocess(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y_bar, ref_zero, desc_ATy,
+            Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_AT)
+    end
     spmv_AT = CUSPARSE_spmv_AT(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y_bar, desc_y, ref_zero, desc_ATy,
         Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_AT)
 
@@ -530,7 +536,9 @@ function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
     ws::Union{HPRLP_workspace_gpu,HPRLP_workspace_cpu},
     params::HPRLP_parameters)
     t_start_power = time()
-    println("ESTIMATING MAXIMUM EIGENVALUE ...")
+    if params.verbose
+        println("ESTIMATING MAXIMUM EIGENVALUE ...")
+    end
     if params.use_gpu
         CUDA.synchronize()
         lambda_max = power_iteration_gpu(ws.spmv_A, ws.spmv_AT, ws.m, ws.n) * 1.01
@@ -539,8 +547,10 @@ function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
         lambda_max = power_iteration_cpu(lp.A, lp.AT) * 1.01
     end
     power_time = time() - t_start_power
-    println(@sprintf("ESTIMATING MAXIMUM EIGENVALUE time = %.2f seconds", power_time))
-    println(@sprintf("estimated maximum eigenvalue of AAT = %.2e", lambda_max))
+    if params.verbose
+        println(@sprintf("ESTIMATING MAXIMUM EIGENVALUE time = %.2f seconds", power_time))
+        println(@sprintf("estimated maximum eigenvalue of AAT = %.2e", lambda_max))
+    end
     ws.lambda_max = lambda_max
 
     return power_time
@@ -551,7 +561,9 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
     scaling_info::Union{Scaling_info_gpu,Scaling_info_cpu},
     params::HPRLP_parameters)
 
-    println("HPR-LP version v0.1.3")
+    if params.verbose
+        println("HPR-LP version v0.1.3")
+    end
     t_start_alg = time()
 
     ### Initialization ###
@@ -562,7 +574,9 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
     ### power iteration to estimate lambda_max ###
     power_time = compute_maximum_eigenvalue!(lp, ws, params)
 
-    println(" iter     errRp        errRd         p_obj            d_obj          gap         sigma       time")
+    if params.verbose
+        println(" iter     errRp        errRd         p_obj            d_obj          gap         sigma       time")
+    end
 
     # Track when tolerance thresholds are reached
     tolerance_levels = [1e-4, 1e-6, 1e-8]
@@ -611,15 +625,17 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
 
         ### print the log ###
         if print_yes || (status != "CONTINUE")
-            println(@sprintf("%5.0f    %3.2e    %3.2e    %+7.6e    %+7.6e    %3.2e    %3.2e    %6.2f",
-                iter,
-                residuals.err_Rp_org_bar,
-                residuals.err_Rd_org_bar,
-                residuals.primal_obj_bar,
-                residuals.dual_obj_bar,
-                residuals.rel_gap_bar,
-                ws.sigma,
-                time() - t_start_alg))
+            if params.verbose
+                println(@sprintf("%5.0f    %3.2e    %3.2e    %+7.6e    %+7.6e    %3.2e    %3.2e    %6.2f",
+                    iter,
+                    residuals.err_Rp_org_bar,
+                    residuals.err_Rd_org_bar,
+                    residuals.primal_obj_bar,
+                    residuals.dual_obj_bar,
+                    residuals.rel_gap_bar,
+                    ws.sigma,
+                    time() - t_start_alg))
+            end
         end
 
         ### collect results and return ###
@@ -629,12 +645,16 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
                 tolerance_times[i] = time() - t_start_alg
                 tolerance_iters[i] = iter
                 tolerance_reached[i] = true
-                println("KKT < ", tolerance_levels[i], " at iter = ", iter)
+                if params.verbose
+                    println("KKT < ", tolerance_levels[i], " at iter = ", iter)
+                end
             end
         end
 
         if status != "CONTINUE"
-            println("Termination reason: ", status, ", accuracy = ", residuals.KKTx_and_gap_org_bar)
+            if params.verbose
+                println("Termination reason: ", status, ", accuracy = ", residuals.KKTx_and_gap_org_bar)
+            end
             results = collect_results!(ws, residuals, scaling_info, iter, t_start_alg, power_time, status, tolerance_times, tolerance_iters)
             return results
         end

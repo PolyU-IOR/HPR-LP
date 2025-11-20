@@ -1,5 +1,5 @@
 # The function to read the LP problem from the file and formulate the LP problem
-function formulation(lp)
+function formulation(lp, verbose::Bool=true)
     A = sparse(lp.arows, lp.acols, lp.avals, lp.ncon, lp.nvar)
 
     # Remove the rows of A that are all zeros
@@ -11,7 +11,9 @@ function formulation(lp)
         A = A[keep_rows, :]
         lp.lcon = lp.lcon[keep_rows]
         lp.ucon = lp.ucon[keep_rows]
-        println("Deleted ", length(del_row), " rows of A that are all zeros.")
+        if verbose
+            println("Deleted ", length(del_row), " rows of A that are all zeros.")
+        end
     end
 
     # Get the index of the different types of constraints
@@ -21,9 +23,11 @@ function formulation(lp)
     idxB = findall((lp.lcon .> -Inf) .& (lp.ucon .< Inf))
     idxB = setdiff(idxB, idxE)
 
-    println("problem information: nRow = ", size(A, 1), ", nCol = ", size(A, 2), ", nnz A = ", nnz(A))
-    println("                     number of equalities = ", length(idxE))
-    println("                     number of inequalities = ", length(idxG) + length(idxL) + length(idxB))
+    if verbose
+        println("problem information: nRow = ", size(A, 1), ", nCol = ", size(A, 2), ", nnz A = ", nnz(A))
+        println("                     number of equalities = ", length(idxE))
+        println("                     number of inequalities = ", length(idxG) + length(idxL) + length(idxB))
+    end
 
     @assert length(lp.lcon) == length(idxE) + length(idxG) + length(idxL) + length(idxB)
 
@@ -174,31 +178,45 @@ end
 # the function to run the HPR-LP algorithm on a single file
 function run_file(FILE_NAME::String, params::HPRLP_parameters)
     t_start = time()
-    println("READING FILE ... ", FILE_NAME)
+    if params.verbose
+        println("READING FILE ... ", FILE_NAME)
+    end
     io = open(FILE_NAME)
     lp = Logging.with_logger(Logging.NullLogger()) do
         readqps(io, mpsformat=:free)
     end
     close(io)
     read_time = time() - t_start
-    println(@sprintf("READING FILE time: %.2f seconds", read_time))
+    if params.verbose
+        println(@sprintf("READING FILE time: %.2f seconds", read_time))
+    end
 
     t_start = time()
     setup_start = time()
-    println("FORMULATING LP ...")
-    standard_lp = formulation(lp)
-    println(@sprintf("FORMULATING LP time: %.2f seconds", time() - t_start))
+    if params.verbose
+        println("FORMULATING LP ...")
+    end
+    standard_lp = formulation(lp, params.verbose)
+    if params.verbose
+        println(@sprintf("FORMULATING LP time: %.2f seconds", time() - t_start))
+    end
 
     if params.use_gpu
         CUDA.device!(params.device_number)
         t_start = time()
-        println("SCALING LP ...")
+        if params.verbose
+            println("SCALING LP ...")
+        end
         scaling_info = scaling!(standard_lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
-        println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        if params.verbose
+            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        end
 
         CUDA.synchronize()
         t_start = time()
-        println("COPY TO GPU ...")
+        if params.verbose
+            println("COPY TO GPU ...")
+        end
         standard_lp_gpu = LP_info_gpu(CuSparseMatrixCSR(standard_lp.A),
             CuSparseMatrixCSR(standard_lp.A'),
             CuVector(standard_lp.c),
@@ -219,12 +237,18 @@ function run_file(FILE_NAME::String, params::HPRLP_parameters)
             scaling_info.norm_b_org,
             scaling_info.norm_c_org)
         CUDA.synchronize()
-        println(@sprintf("COPY TO GPU time: %.2f seconds", time() - t_start))
+        if params.verbose
+            println(@sprintf("COPY TO GPU time: %.2f seconds", time() - t_start))
+        end
     else
         t_start = time()
-        println("SCALING LP ...")
+        if params.verbose
+            println("SCALING LP ...")
+        end
         scaling_info = scaling!(standard_lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
-        println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        if params.verbose
+            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        end
     end
 
     setup_time = time() - setup_start
@@ -233,16 +257,58 @@ function run_file(FILE_NAME::String, params::HPRLP_parameters)
     else
         results = solve(standard_lp, scaling_info, params)
     end
-    println(@sprintf("Total time: %.2fs", read_time + setup_time + results.time),
-        @sprintf("  read time = %.2fs", read_time),
-        @sprintf("  setup time = %.2fs", setup_time),
-        @sprintf("  solve time = %.2fs", results.time))
+    if params.verbose
+        println(@sprintf("Total time: %.2fs", read_time + setup_time + results.time),
+            @sprintf("  read time = %.2fs", read_time),
+            @sprintf("  setup time = %.2fs", setup_time),
+            @sprintf("  solve time = %.2fs", results.time))
+    end
 
     return results
 end
 
+"""
+    run_lp(A, AL, AU, c, l, u, obj_constant, params)
 
-# it's used in demo_Abc.jl
+Solve a linear program in standard form using the HPR-LP algorithm.
+
+# Arguments
+- `A::SparseMatrixCSC`: Constraint matrix (m × n)
+- `AL::Vector{Float64}`: Lower bounds for constraints Ax (length m)
+- `AU::Vector{Float64}`: Upper bounds for constraints Ax (length m)
+- `c::Vector{Float64}`: Objective coefficients (length n)
+- `l::Vector{Float64}`: Lower bounds for variables x (length n)
+- `u::Vector{Float64}`: Upper bounds for variables x (length n)
+- `obj_constant::Float64`: Constant term in objective function
+- `params::HPRLP_parameters`: Solver parameters
+
+# Returns
+- `HPRLP_results`: Solution results including objective value, solution vector, and convergence info
+
+# Example
+```julia
+using SparseArrays, HPRLP
+
+# min -3x - 5y
+# s.t. x + 2y ≤ 10
+#      3x + y ≤ 12
+#      x, y ≥ 0
+
+A = sparse([1.0 2.0; 3.0 1.0])
+AL = [-Inf, -Inf]
+AU = [10.0, 12.0]
+c = [-3.0, -5.0]
+l = [0.0, 0.0]
+u = [Inf, Inf]
+
+params = HPRLP_parameters()
+params.verbose = false
+
+results = run_lp(A, AL, AU, c, l, u, 0.0, params)
+println("Optimal value: ", results.primal_obj)
+println("Solution: ", results.x)
+```
+"""
 function run_lp(A::SparseMatrixCSC,
     AL::Vector{Float64},
     AU::Vector{Float64},
@@ -253,19 +319,27 @@ function run_lp(A::SparseMatrixCSC,
     params::HPRLP_parameters)
     
     if params.warm_up
-        println("warm up starts: ---------------------------------------------------------------------------------------------------------- ")
+        if params.verbose
+            println("warm up starts: ---------------------------------------------------------------------------------------------------------- ")
+        end
         t_start_all = time()
         max_iter = params.max_iter
         params.max_iter = 200
         results = run_Abc(A, c, AL, AU, l, u, obj_constant, params)
         params.max_iter = max_iter
         all_time = time() - t_start_all
-        println("warm up time: ", all_time)
-        println("warm up ends ----------------------------------------------------------------------------------------------------------")
+        if params.verbose
+            println("warm up time: ", all_time)
+            println("warm up ends ----------------------------------------------------------------------------------------------------------")
+        end
     end
-    println("main run starts: ----------------------------------------------------------------------------------------------------------")
+    if params.verbose
+        println("main run starts: ----------------------------------------------------------------------------------------------------------")
+    end
     results = run_Abc(A, c, AL, AU, l, u, obj_constant, params)
-    println("main run ends----------------------------------------------------------------------------------------------------------")
+    if params.verbose
+        println("main run ends----------------------------------------------------------------------------------------------------------")
+    end
     return results
 end
 
@@ -289,13 +363,19 @@ function run_Abc(A::SparseMatrixCSC,
     if params.use_gpu
         CUDA.device!(params.device_number)
         t_start = time()
-        println("SCALING LP ...")
+        if params.verbose
+            println("SCALING LP ...")
+        end
         scaling_info = scaling!(standard_lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
-        println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        if params.verbose
+            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        end
 
         CUDA.synchronize()
         t_start = time()
-        println("COPY TO GPU ...")
+        if params.verbose
+            println("COPY TO GPU ...")
+        end
         standard_lp_gpu = LP_info_gpu(CuSparseMatrixCSR(standard_lp.A),
             CuSparseMatrixCSR(standard_lp.A'),
             CuVector(standard_lp.c),
@@ -316,12 +396,18 @@ function run_Abc(A::SparseMatrixCSC,
             scaling_info.norm_b_org,
             scaling_info.norm_c_org)
         CUDA.synchronize()
-        println(@sprintf("COPY TO GPU time: %.2f seconds", time() - t_start))
+        if params.verbose
+            println(@sprintf("COPY TO GPU time: %.2f seconds", time() - t_start))
+        end
     else
         t_start = time()
-        println("SCALING LP ...")
+        if params.verbose
+            println("SCALING LP ...")
+        end
         scaling_info = scaling!(standard_lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
-        println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        if params.verbose
+            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        end
     end
     setup_time = time() - setup_start
 
@@ -330,9 +416,11 @@ function run_Abc(A::SparseMatrixCSC,
     else
         results = solve(standard_lp, scaling_info, params)
     end
-    println(@sprintf("Total time: %.2fs", setup_time + results.time),
-        @sprintf("  setup time = %.2fs", setup_time),
-        @sprintf("  solve time = %.2fs", results.time))
+    if params.verbose
+        println(@sprintf("Total time: %.2fs", setup_time + results.time),
+            @sprintf("  setup time = %.2fs", setup_time),
+            @sprintf("  solve time = %.2fs", results.time))
+    end
     return results
 end
 
@@ -476,26 +564,65 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
     close(io)
 end
 
-# the function to test the HPR-LP algorithm on a single file
+"""
+    run_single(file_name, params)
+
+Solve a linear program from an MPS file using the HPR-LP algorithm.
+
+# Arguments
+- `file_name::String`: Path to the .mps file
+- `params::HPRLP_parameters`: Solver parameters
+
+# Returns
+- `HPRLP_results`: Solution results including objective value, solution vector, and convergence info
+
+# Example
+```julia
+using HPRLP
+
+params = HPRLP_parameters()
+params.stoptol = 1e-6
+params.verbose = true
+
+results = run_single("problem.mps", params)
+
+println("Status: ", results.status)
+println("Objective: ", results.primal_obj)
+println("Time: ", results.time, " seconds")
+println("Iterations: ", results.iter)
+```
+
+See also: [`run_lp`](@ref), [`HPRLP_parameters`](@ref), [`HPRLP_results`](@ref)
+"""
 function run_single(file_name::String, params::HPRLP_parameters)
-    println("data path: ", file_name)
+    if params.verbose
+        println("data path: ", file_name)
+    end
 
     if occursin(".mps", file_name)
         if params.warm_up
-            println("warm up starts: ---------------------------------------------------------------------------------------------------------- ")
+            if params.verbose
+                println("warm up starts: ---------------------------------------------------------------------------------------------------------- ")
+            end
             t_start_all = time()
             max_iter = params.max_iter
             params.max_iter = 200
             results = run_file(file_name, params)
             params.max_iter = max_iter
             all_time = time() - t_start_all
-            println("warm up time: ", all_time)
-            println("warm up ends ----------------------------------------------------------------------------------------------------------")
+            if params.verbose
+                println("warm up time: ", all_time)
+                println("warm up ends ----------------------------------------------------------------------------------------------------------")
+            end
         end
 
-        println("main run starts: ----------------------------------------------------------------------------------------------------------")
+        if params.verbose
+            println("main run starts: ----------------------------------------------------------------------------------------------------------")
+        end
         results = run_file(file_name, params)
-        println("main run ends----------------------------------------------------------------------------------------------------------")
+        if params.verbose
+            println("main run ends----------------------------------------------------------------------------------------------------------")
+        end
     else
         error("The file is not in the correct format, please provide a .mps file")
     end
@@ -529,53 +656,3 @@ const OptimizerCache = MOI.Utilities.GenericModel{
         LPSets{Float64},
     },
 }
-
-# Helper function to extract LP data from JuMP model
-# This uses MOI's MatrixOfConstraints for efficient matrix extraction
-function extract_lp_data(model::Model)
-    # Get the backend MOI model
-    moi_backend = backend(model)
-    
-    # Extract objective function from JuMP model
-    obj = MOI.get(moi_backend, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}())
-    sense = MOI.get(moi_backend, MOI.ObjectiveSense())
-    
-    # Create cache and copy model for constraint matrix
-    cache = OptimizerCache()
-    MOI.copy_to(cache, moi_backend)
-    
-    # Extract sparse matrix and bounds from cache
-    A = cache.constraints.coefficients
-    row_bounds = cache.constraints.constants
-    
-    # Convert bounds from sets to vectors
-    AL = row_bounds.lower
-    AU = row_bounds.upper
-    
-    # Extract variable bounds
-    l = cache.variables.lower
-    u = cache.variables.upper
-    
-    # Convert objective to coefficient vector using sparse vector
-    indices = [term.variable.value for term in obj.terms]
-    values = [term.coefficient for term in obj.terms]
-    c = Vector(sparsevec(indices, values, A.n)) 
-    obj_constant = obj.constant
-    
-    # Handle maximization
-    if sense == MOI.MAX_SENSE
-        c = -c
-        obj_constant = -obj_constant
-    end
-    
-    # Convert to standard Julia SparseMatrixCSC
-    A_sparse = SparseMatrixCSC(A.m, A.n, A.colptr, A.rowval, A.nzval)
-    
-    return A_sparse, AL, AU, c, l, u, obj_constant
-end
-
-function run_JuMP_model(model::Model, params::HPRLP_parameters)
-    A, AL, AU, c, l, u, obj_constant = extract_lp_data(model)
-    HPRLP_result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
-    return HPRLP_result
-end

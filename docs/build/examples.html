@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Examples · HPRLP.jl</title><meta name="title" content="Examples · HPRLP.jl"/><meta property="og:title" content="Examples · HPRLP.jl"/><meta property="twitter:title" content="Examples · HPRLP.jl"/><meta name="description" content="Documentation for HPRLP.jl."/><meta property="og:description" content="Documentation for HPRLP.jl."/><meta property="twitter:description" content="Documentation for HPRLP.jl."/><meta property="og:url" content="https://PolyU-IOR.github.io/HPR-LP/examples.html"/><meta property="twitter:url" content="https://PolyU-IOR.github.io/HPR-LP/examples.html"/><link rel="canonical" href="https://PolyU-IOR.github.io/HPR-LP/examples.html"/><script data-outdated-warner src="assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL="."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="assets/documenter.js"></script><script src="search_index.js"></script><script src="siteinfo.js"></script><script src="../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="index.html">HPRLP.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="index.html">Home</a></li><li><a class="tocitem" href="getting_started.html">Getting Started</a></li><li><span class="tocitem">User Guide</span><ul><li><a class="tocitem" href="guide/mps_files.html">MPS Files</a></li><li><a class="tocitem" href="guide/direct_api.html">Direct API</a></li><li><a class="tocitem" href="guide/jump_integration.html">JuMP Integration</a></li></ul></li><li><a class="tocitem" href="api.html">API Reference</a></li><li class="is-active"><a class="tocitem" href="examples.html">Examples</a><ul class="internal"><li><a class="tocitem" href="#Example-1:-Basic-Linear-Program"><span>Example 1: Basic Linear Program</span></a></li><li><a class="tocitem" href="#Example-2:-Solving-an-MPS-File"><span>Example 2: Solving an MPS File</span></a></li><li><a class="tocitem" href="#Example-3:-JuMP-Model"><span>Example 3: JuMP Model</span></a></li><li><a class="tocitem" href="#Example-4:-Production-Planning"><span>Example 4: Production Planning</span></a></li><li><a class="tocitem" href="#Example-5:-Transportation-Problem"><span>Example 5: Transportation Problem</span></a></li><li><a class="tocitem" href="#Example-6:-Portfolio-Optimization"><span>Example 6: Portfolio Optimization</span></a></li><li><a class="tocitem" href="#Example-7:-Batch-Processing"><span>Example 7: Batch Processing</span></a></li><li><a class="tocitem" href="#Example-8:-Comparing-Solvers"><span>Example 8: Comparing Solvers</span></a></li><li><a class="tocitem" href="#Example-9:-Warm-up-for-Performance"><span>Example 9: Warm-up for Performance</span></a></li><li><a class="tocitem" href="#Running-the-Examples"><span>Running the Examples</span></a></li></ul></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href="examples.html">Examples</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href="examples.html">Examples</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/PolyU-IOR/HPR-LP" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/PolyU-IOR/HPR-LP/blob/main/docs/src/examples.md" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Examples"><a class="docs-heading-anchor" href="#Examples">Examples</a><a id="Examples-1"></a><a class="docs-heading-anchor-permalink" href="#Examples" title="Permalink"></a></h1><p>This page provides complete, runnable examples demonstrating various use cases of HPRLP.</p><h2 id="Example-1:-Basic-Linear-Program"><a class="docs-heading-anchor" href="#Example-1:-Basic-Linear-Program">Example 1: Basic Linear Program</a><a id="Example-1:-Basic-Linear-Program-1"></a><a class="docs-heading-anchor-permalink" href="#Example-1:-Basic-Linear-Program" title="Permalink"></a></h2><p>Solve a simple 2-variable LP problem.</p><pre><code class="language-julia hljs">using HPRLP
+using SparseArrays
+
+# Problem:
+# min  -3x₁ - 5x₂
+# s.t.  x₁ + 2x₂ ≤ 10
+#      3x₁ +  x₂ ≤ 12
+#      x₁, x₂ ≥ 0
+
+# Standard form: AL ≤ Ax ≤ AU
+A = sparse([-1.0 -2.0; -3.0 -1.0])
+AL = [-10.0, -12.0]
+AU = [Inf, Inf]
+c = [-3.0, -5.0]
+l = [0.0, 0.0]
+u = [Inf, Inf]
+
+params = HPRLP_parameters()
+params.use_gpu = false
+params.verbose = true
+
+result = run_lp(A, AL, AU, c, l, u, 0.0, params)
+
+println(&quot;\n=== Results ===&quot;)
+println(&quot;Status: &quot;, result.output_type)
+println(&quot;Objective value: &quot;, result.primal_obj)
+println(&quot;x₁ = &quot;, result.x[1])
+println(&quot;x₂ = &quot;, result.x[2])
+println(&quot;Iterations: &quot;, result.iter)
+println(&quot;Time: &quot;, result.time, &quot; seconds&quot;)</code></pre><h2 id="Example-2:-Solving-an-MPS-File"><a class="docs-heading-anchor" href="#Example-2:-Solving-an-MPS-File">Example 2: Solving an MPS File</a><a id="Example-2:-Solving-an-MPS-File-1"></a><a class="docs-heading-anchor-permalink" href="#Example-2:-Solving-an-MPS-File" title="Permalink"></a></h2><p>Read and solve a problem from an MPS file.</p><pre><code class="language-julia hljs">using HPRLP
+
+# Configure solver
+params = HPRLP_parameters()
+params.stoptol = 1e-6        # High accuracy
+params.use_gpu = true        # Enable GPU
+params.verbose = true        # Show progress
+params.time_limit = 3600     # 1 hour limit
+
+# Solve
+result = run_single(&quot;path/to/problem.mps&quot;, params)
+
+# Display results
+if result.output_type == &quot;OPTIMAL&quot;
+    println(&quot;✓ Optimal solution found!&quot;)
+    println(&quot;  Objective: &quot;, result.primal_obj)
+    println(&quot;  Iterations: &quot;, result.iter)
+    println(&quot;  Time: &quot;, result.time, &quot; seconds&quot;)
+    println(&quot;  Residuals: &quot;, result.residuals)
+else
+    println(&quot;⚠ Solver stopped: &quot;, result.output_type)
+    println(&quot;  Best objective: &quot;, result.primal_obj)
+end</code></pre><h2 id="Example-3:-JuMP-Model"><a class="docs-heading-anchor" href="#Example-3:-JuMP-Model">Example 3: JuMP Model</a><a id="Example-3:-JuMP-Model-1"></a><a class="docs-heading-anchor-permalink" href="#Example-3:-JuMP-Model" title="Permalink"></a></h2><p>Build and solve using JuMP&#39;s modeling language.</p><pre><code class="language-julia hljs">using JuMP, HPRLP
+
+# Create model
+model = Model(HPRLP.Optimizer)
+set_optimizer_attribute(model, &quot;stoptol&quot;, 1e-4)
+set_optimizer_attribute(model, &quot;use_gpu&quot;, false)
+
+# Define problem
+@variable(model, x1 &gt;= 0)
+@variable(model, x2 &gt;= 0)
+@objective(model, Min, -3x1 - 5x2)
+@constraint(model, c1, x1 + 2x2 &lt;= 10)
+@constraint(model, c2, 3x1 + x2 &lt;= 12)
+
+# Solve
+optimize!(model)
+
+# Results
+println(&quot;Status: &quot;, termination_status(model))
+println(&quot;Optimal value: &quot;, objective_value(model))
+println(&quot;x1 = &quot;, value(x1))
+println(&quot;x2 = &quot;, value(x2))
+println(&quot;Solve time: &quot;, solve_time(model), &quot; seconds&quot;)</code></pre><h2 id="Example-4:-Production-Planning"><a class="docs-heading-anchor" href="#Example-4:-Production-Planning">Example 4: Production Planning</a><a id="Example-4:-Production-Planning-1"></a><a class="docs-heading-anchor-permalink" href="#Example-4:-Production-Planning" title="Permalink"></a></h2><p>A realistic production planning problem.</p><pre><code class="language-julia hljs">using JuMP, HPRLP
+
+# Problem data
+n_products = 10
+n_resources = 5
+
+# Profit per unit
+profit = [50, 60, 40, 70, 55, 45, 65, 48, 52, 58]
+
+# Resource usage (resources × products)
+resource_usage = [
+    2 3 1 4 2 1 3 2 1 3;
+    1 2 2 1 3 2 1 2 3 1;
+    3 1 2 2 1 3 2 1 2 2;
+    1 1 1 2 2 1 3 1 1 2;
+    2 2 3 1 1 2 1 3 2 1
+]
+
+# Available resources
+capacity = [100, 80, 120, 90, 110]
+
+# Build model
+model = Model(HPRLP.Optimizer)
+set_silent(model)
+
+@variable(model, production[1:n_products] &gt;= 0)
+@objective(model, Max, sum(profit[p] * production[p] for p in 1:n_products))
+
+for r in 1:n_resources
+    @constraint(model, 
+        sum(resource_usage[r,p] * production[p] for p in 1:n_products) 
+        &lt;= capacity[r]
+    )
+end
+
+# Solve
+optimize!(model)
+
+# Display solution
+println(&quot;=== Production Plan ===&quot;)
+println(&quot;Total Profit: \$&quot;, round(objective_value(model), digits=2))
+println(&quot;\nProduction Quantities:&quot;)
+for p in 1:n_products
+    qty = value(production[p])
+    if qty &gt; 0.01
+        revenue = profit[p] * qty
+        println(&quot;  Product $p: &quot;, round(qty, digits=2), 
+                &quot; units (revenue: \$&quot;, round(revenue, digits=2), &quot;)&quot;)
+    end
+end</code></pre><h2 id="Example-5:-Transportation-Problem"><a class="docs-heading-anchor" href="#Example-5:-Transportation-Problem">Example 5: Transportation Problem</a><a id="Example-5:-Transportation-Problem-1"></a><a class="docs-heading-anchor-permalink" href="#Example-5:-Transportation-Problem" title="Permalink"></a></h2><p>Classical transportation problem.</p><pre><code class="language-julia hljs">using JuMP, HPRLP
+
+# Supply at each factory
+factories = 1:3
+supply = [300, 400, 500]
+
+# Demand at each warehouse
+warehouses = 1:4
+demand = [250, 350, 200, 400]
+
+# Transportation costs (factories × warehouses)
+cost = [
+    4 6 8 5;
+    3 7 9 4;
+    5 5 6 7
+]
+
+# Build model
+model = Model(HPRLP.Optimizer)
+set_silent(model)
+
+@variable(model, ship[f in factories, w in warehouses] &gt;= 0)
+@objective(model, Min, 
+    sum(cost[f,w] * ship[f,w] for f in factories, w in warehouses)
+)
+
+# Supply constraints
+for f in factories
+    @constraint(model, sum(ship[f,w] for w in warehouses) &lt;= supply[f])
+end
+
+# Demand constraints
+for w in warehouses
+    @constraint(model, sum(ship[f,w] for f in factories) &gt;= demand[w])
+end
+
+# Solve
+optimize!(model)
+
+# Display solution
+println(&quot;=== Transportation Plan ===&quot;)
+println(&quot;Total Cost: \$&quot;, round(objective_value(model), digits=2))
+println(&quot;\nShipments:&quot;)
+for f in factories
+    for w in warehouses
+        qty = value(ship[f,w])
+        if qty &gt; 0.01
+            println(&quot;  Factory $f → Warehouse $w: &quot;, 
+                    round(qty, digits=0), &quot; units&quot;)
+        end
+    end
+end</code></pre><h2 id="Example-6:-Portfolio-Optimization"><a class="docs-heading-anchor" href="#Example-6:-Portfolio-Optimization">Example 6: Portfolio Optimization</a><a id="Example-6:-Portfolio-Optimization-1"></a><a class="docs-heading-anchor-permalink" href="#Example-6:-Portfolio-Optimization" title="Permalink"></a></h2><p>Simple portfolio selection problem.</p><pre><code class="language-julia hljs">using HPRLP
+using SparseArrays
+using LinearAlgebra
+
+# Number of assets
+n_assets = 50
+
+# Expected returns
+expected_returns = 0.05 .+ 0.10 * rand(n_assets)
+
+# Constraints
+A = sparse(ones(1, n_assets))  # Sum of weights
+AL = [1.0]                      # = 1 (fully invested)
+AU = [1.0]
+
+# Objective: maximize expected return (min -return)
+c = -expected_returns
+
+# Variable bounds: 0 ≤ w ≤ 0.1 (max 10% per asset)
+l = zeros(n_assets)
+u = 0.1 * ones(n_assets)
+
+# Solve
+params = HPRLP_parameters()
+params.use_gpu = false
+params.verbose = false
+
+result = run_lp(A, AL, AU, c, l, u, 0.0, params)
+
+# Results
+weights = result.x
+expected_portfolio_return = -result.primal_obj
+
+println(&quot;=== Portfolio ===&quot;)
+println(&quot;Expected Return: &quot;, round(expected_portfolio_return * 100, digits=2), &quot;%&quot;)
+println(&quot;Number of Assets: &quot;, count(weights .&gt; 1e-6))
+println(&quot;\nTop 5 Holdings:&quot;)
+sorted_idx = sortperm(weights, rev=true)
+for i in 1:min(5, n_assets)
+    idx = sorted_idx[i]
+    if weights[idx] &gt; 1e-6
+        println(&quot;  Asset $idx: &quot;, round(weights[idx] * 100, digits=2), 
+                &quot;% (return: &quot;, round(expected_returns[idx] * 100, digits=2), &quot;%)&quot;)
+    end
+end</code></pre><h2 id="Example-7:-Batch-Processing"><a class="docs-heading-anchor" href="#Example-7:-Batch-Processing">Example 7: Batch Processing</a><a id="Example-7:-Batch-Processing-1"></a><a class="docs-heading-anchor-permalink" href="#Example-7:-Batch-Processing" title="Permalink"></a></h2><p>Solve multiple problems in batch.</p><pre><code class="language-julia hljs">using HPRLP
+
+function solve_batch_problems(files::Vector{String}, output_csv::String)
+    # Setup
+    params = HPRLP_parameters()
+    params.verbose = false
+    params.use_gpu = true
+    params.time_limit = 600  # 10 minutes per problem
+    
+    # Results storage
+    results = []
+    
+    println(&quot;Processing $(length(files)) files...&quot;)
+    
+    for (i, file) in enumerate(files)
+        println(&quot;  [$i/$(length(files))] $file&quot;)
+        
+        try
+            result = run_single(file, params)
+            
+            push!(results, (
+                file = basename(file),
+                status = result.output_type,
+                objective = result.primal_obj,
+                iterations = result.iter,
+                time = result.time,
+                residuals = result.residuals
+            ))
+            
+            println(&quot;    ✓ $(result.output_type) in $(round(result.time, digits=2))s&quot;)
+        catch e
+            println(&quot;    ✗ ERROR: $e&quot;)
+            push!(results, (
+                file = basename(file),
+                status = &quot;ERROR&quot;,
+                objective = NaN,
+                iterations = 0,
+                time = 0.0,
+                residuals = NaN
+            ))
+        end
+    end
+    
+    # Save results (simplified - use CSV.jl for real implementation)
+    open(output_csv, &quot;w&quot;) do io
+        println(io, &quot;File,Status,Objective,Iterations,Time,Residuals&quot;)
+        for r in results
+            println(io, &quot;$(r.file),$(r.status),$(r.objective),$(r.iterations),$(r.time),$(r.residuals)&quot;)
+        end
+    end
+    
+    println(&quot;\nResults saved to: $output_csv&quot;)
+    return results
+end
+
+# Usage
+files = [&quot;problem1.mps&quot;, &quot;problem2.mps&quot;, &quot;problem3.mps&quot;]
+results = solve_batch_problems(files, &quot;results.csv&quot;)</code></pre><h2 id="Example-8:-Comparing-Solvers"><a class="docs-heading-anchor" href="#Example-8:-Comparing-Solvers">Example 8: Comparing Solvers</a><a id="Example-8:-Comparing-Solvers-1"></a><a class="docs-heading-anchor-permalink" href="#Example-8:-Comparing-Solvers" title="Permalink"></a></h2><p>Compare HPRLP with other solvers.</p><pre><code class="language-julia hljs">using JuMP, HPRLP, HiGHS
+using BenchmarkTools
+
+function build_test_problem()
+    model = Model()
+    
+    # Large random LP
+    n = 1000
+    m = 500
+    
+    @variable(model, x[1:n] &gt;= 0)
+    @objective(model, Min, sum(rand() * x[i] for i in 1:n))
+    
+    for j in 1:m
+        @constraint(model, 
+            sum(rand() * x[i] for i in 1:n) &lt;= 100
+        )
+    end
+    
+    return model
+end
+
+# Test HPRLP (CPU)
+model1 = build_test_problem()
+set_optimizer(model1, HPRLP.Optimizer)
+set_silent(model1)
+set_optimizer_attribute(model1, &quot;use_gpu&quot;, false)
+@time optimize!(model1)
+println(&quot;HPRLP (CPU): &quot;, objective_value(model1))
+
+# Test HPRLP (GPU)
+model2 = build_test_problem()
+set_optimizer(model2, HPRLP.Optimizer)
+set_silent(model2)
+set_optimizer_attribute(model2, &quot;use_gpu&quot;, true)
+@time optimize!(model2)
+println(&quot;HPRLP (GPU): &quot;, objective_value(model2))
+
+# Test HiGHS
+model3 = build_test_problem()
+set_optimizer(model3, HiGHS.Optimizer)
+set_silent(model3)
+@time optimize!(model3)
+println(&quot;HiGHS: &quot;, objective_value(model3))</code></pre><h2 id="Example-9:-Warm-up-for-Performance"><a class="docs-heading-anchor" href="#Example-9:-Warm-up-for-Performance">Example 9: Warm-up for Performance</a><a id="Example-9:-Warm-up-for-Performance-1"></a><a class="docs-heading-anchor-permalink" href="#Example-9:-Warm-up-for-Performance" title="Permalink"></a></h2><p>Demonstrate warm-up benefit.</p><pre><code class="language-julia hljs">using HPRLP
+using SparseArrays
+
+# Problem definition
+A = sparse(rand(100, 200))
+AL = zeros(100)
+AU = 100 * ones(100)
+c = rand(200)
+l = zeros(200)
+u = 100 * ones(200)
+
+# Without warm-up (cold start)
+params_cold = HPRLP_parameters()
+params_cold.warm_up = false
+params_cold.verbose = false
+params_cold.use_gpu = false
+
+println(&quot;=== Cold Start ===&quot;)
+@time result1 = run_lp(A, AL, AU, c, l, u, 0.0, params_cold)
+println(&quot;Solve time: &quot;, result1.time)
+
+# With warm-up (subsequent runs faster)
+params_warm = HPRLP_parameters()
+params_warm.warm_up = true
+params_warm.verbose = false
+params_warm.use_gpu = false
+
+println(&quot;\n=== With Warm-up ===&quot;)
+@time result2 = run_lp(A, AL, AU, c, l, u, 0.0, params_warm)
+println(&quot;Solve time: &quot;, result2.time)
+
+# Second run (already compiled)
+println(&quot;\n=== Second Run (Already Compiled) ===&quot;)
+@time result3 = run_lp(A, AL, AU, c, l, u, 0.0, params_warm)
+println(&quot;Solve time: &quot;, result3.time)</code></pre><h2 id="Running-the-Examples"><a class="docs-heading-anchor" href="#Running-the-Examples">Running the Examples</a><a id="Running-the-Examples-1"></a><a class="docs-heading-anchor-permalink" href="#Running-the-Examples" title="Permalink"></a></h2><p>All examples can be run directly after installing HPRLP:</p><pre><code class="language-julia hljs">using Pkg
+Pkg.add(&quot;HPRLP&quot;)  # or add from GitHub
+
+# Copy and paste any example above
+# ...</code></pre><p>For more examples, see the <a href="https://github.com/PolyU-IOR/HPR-LP/tree/main/demo">demo</a> directory in the repository.</p></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="api.html">« API Reference</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.16.0 on <span class="colophon-date" title="Thursday 20 November 2025 09:56">Thursday 20 November 2025</span>. Using Julia version 1.10.4.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
