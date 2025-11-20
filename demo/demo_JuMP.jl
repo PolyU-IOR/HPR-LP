@@ -1,12 +1,12 @@
 using JuMP
 using SparseArrays
-import HPRLP
+import HprLP
 
 # =============================================================================
 # Example: Using the MOI Optimizer with JuMP
 # =============================================================================
 
-model = Model(HPRLP.Optimizer)
+model = Model(HprLP.Optimizer)
 
 # Set solver attributes
 set_attribute(model, "stoptol", 1e-4)

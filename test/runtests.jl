@@ -1,23 +1,23 @@
 using Test
-using HPRLP
+using HprLP
 using SparseArrays
 using LinearAlgebra
 
-@testset "HPRLP.jl" begin
+@testset "HprLP.jl" begin
     
     @testset "MPS File Solving" begin
         # Test solving an MPS file
         mps_file = joinpath(@__DIR__, "..", "model.mps")
         
         if isfile(mps_file)
-            params = HPRLP.HPRLP_parameters()
+            params = HprLP.HPRLP_parameters()
             params.time_limit = 60
             params.stoptol = 1e-4
             params.use_gpu = false  # CPU for testing
             params.warm_up = false
             params.verbose = false  # Silent mode for tests
             
-            result = HPRLP.run_single(mps_file, params)
+            result = HprLP.run_single(mps_file, params)
             
             @test result.output_type == "OPTIMAL"
             # Problem: min -3x1 - 5x2, s.t. x1+2x2<=10, 3x1+x2<=12, x1,x2>=0
@@ -47,14 +47,14 @@ using LinearAlgebra
         u = Vector{Float64}([Inf, Inf])
         obj_constant = 0.0
         
-        params = HPRLP.HPRLP_parameters()
+        params = HprLP.HPRLP_parameters()
         params.time_limit = 60
         params.stoptol = 1e-4
         params.use_gpu = false  # CPU for testing
         params.warm_up = false
         params.verbose = false  # Silent mode for tests
         
-        result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+        result = HprLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
         
         @test result.output_type == "OPTIMAL"
         @test isapprox(result.primal_obj, -26.4, atol=1e-2)
@@ -64,15 +64,15 @@ using LinearAlgebra
     
     @testset "JuMP Integration - Optimizer" begin
         # Test that Optimizer is exported and can be instantiated
-        @test isdefined(HPRLP, :Optimizer)
+        @test isdefined(HprLP, :Optimizer)
         
         # Try to create an optimizer instance
-        optimizer = HPRLP.Optimizer()
-        @test optimizer isa HPRLP.Optimizer
+        optimizer = HprLP.Optimizer()
+        @test optimizer isa HprLP.Optimizer
     end
     
     @testset "Parameter Validation" begin
-        params = HPRLP.HPRLP_parameters()
+        params = HprLP.HPRLP_parameters()
         
         # Test default values
         @test params.stoptol == 1e-4
@@ -109,14 +109,14 @@ using LinearAlgebra
         u = Vector{Float64}([1.0, 1.0])
         obj_constant = 0.0
         
-        params = HPRLP.HPRLP_parameters()
+        params = HprLP.HPRLP_parameters()
         params.time_limit = 60
         params.stoptol = 1e-4
         params.use_gpu = false
         params.warm_up = false
         params.verbose = false  # Silent mode for tests
         
-        result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+        result = HprLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
         
         # Test that result has all expected fields
         @test isdefined(result, :iter)
@@ -149,14 +149,14 @@ using LinearAlgebra
         u = Vector{Float64}([1.0, 1.0])
         obj_constant = 0.0
         
-        params = HPRLP.HPRLP_parameters()
+        params = HprLP.HPRLP_parameters()
         params.time_limit = 60
         params.stoptol = 1e-4
         params.use_gpu = false
         params.warm_up = false
         params.verbose = false  # Silent mode for tests
         
-        result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+        result = HprLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
         
         @test result.output_type == "OPTIMAL"
         # Optimal solution should be x1=1, x2=0, objective=1

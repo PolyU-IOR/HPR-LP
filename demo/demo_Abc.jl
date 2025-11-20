@@ -1,6 +1,6 @@
 using SparseArrays
 using LinearAlgebra
-import HPRLP
+import HprLP
 
 
 # min <c,x>
@@ -24,14 +24,14 @@ u = Vector{Float64}([Inf, Inf])
 
 obj_constant = 0.0
 
-params = HPRLP.HPRLP_parameters()
+params = HprLP.HPRLP_parameters()
 params.time_limit = 3600
 params.stoptol = 1e-4 # can be adjusted as needed to higher accuracy such as 1e-9
 params.device_number = 0
 params.use_gpu = true
 params.warm_up = true
 
-result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+result = HprLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
 
 println("Objective value: ", result.primal_obj)
 println("x1 = ", result.x[1])
