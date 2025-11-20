@@ -1,6 +1,11 @@
 # HPR-LP: A GPU Solver for Linear Programming
 
+[![Documentation](https://img.shields.io/badge/docs-stable-blue.svg)](https://polyu-ior.github.io/HPR-LP/)
+[![CI](https://github.com/PolyU-IOR/HPR-LP/actions/workflows/CI.yml/badge.svg)](https://github.com/PolyU-IOR/HPR-LP/actions/workflows/CI.yml)
+
 > **A Julia implementation of the Halpern Peaceman-Rachford (HPR) method for solving linear programming (LP) problems on the GPU.**
+
+**📖 [Read the Documentation](https://polyu-ior.github.io/HPR-LP/)**
 
 ---
 
