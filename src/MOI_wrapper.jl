@@ -121,6 +121,7 @@ const SUPPORTED_PARAMETERS = (
     "device_number",
     "warm_up",
     "print_frequency",
+    "verbose",
 )
 
 function MOI.supports(::Optimizer, param::MOI.RawOptimizerAttribute)
@@ -151,6 +152,8 @@ function MOI.set(model::Optimizer, param::MOI.RawOptimizerAttribute, value)
         model.params.warm_up = Bool(value)
     elseif name == "print_frequency"
         model.params.print_frequency = Int(value)
+    elseif name == "verbose"
+        model.params.verbose = Bool(value)
     else
         throw(MOI.UnsupportedAttribute(param))
     end
@@ -181,6 +184,8 @@ function MOI.get(model::Optimizer, param::MOI.RawOptimizerAttribute)
         return model.params.warm_up
     elseif name == "print_frequency"
         return model.params.print_frequency
+    elseif name == "verbose"
+        return model.params.verbose
     end
     throw(MOI.UnsupportedAttribute(param))
 end
@@ -315,8 +320,11 @@ function MOI.optimize!(dest::Optimizer, src::OptimizerCache)
     # Convert to standard Julia SparseMatrixCSC
     A_sparse = SparseMatrixCSC(A.m, A.n, A.colptr, A.rowval, A.nzval)
     
-    # Set verbose based on silent mode
-    dest.params.verbose = !dest.silent
+    # Set verbose: if silent mode is set, disable verbose regardless of parameter
+    # Otherwise, use the parameter setting
+    if dest.silent
+        dest.params.verbose = false
+    end
     
     # Run the HPRLP solver
     dest.results = run_lp(A_sparse, AL, AU, c, l, u, obj_constant, dest.params)

@@ -13,9 +13,14 @@ makedocs(
         "Home" => "index.md",
         "Getting Started" => "getting_started.md",
         "User Guide" => [
-            "MPS Files" => "guide/mps_files.md",
-            "Direct API" => "guide/direct_api.md",
-            "JuMP Integration" => "guide/jump_integration.md",
+            "Input Methods" => [
+                "Overview" => "guide/input_overview.md",
+                "Direct API" => "guide/direct_api.md",
+                "JuMP Integration" => "guide/jump_integration.md",
+                "MPS Files" => "guide/mps_files.md",
+            ],
+            "Parameters" => "guide/parameters.md",
+            "Output & Results" => "guide/output_results.md",
         ],
         "API Reference" => "api.md",
         "Examples" => "examples.md",

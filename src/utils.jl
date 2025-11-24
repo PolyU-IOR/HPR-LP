@@ -175,8 +175,43 @@ function power_iteration_cpu(A::SparseMatrixCSC, AT::SparseMatrixCSC,
     return lambda_max
 end
 
+"""
+    validate_gpu_parameters!(params::HPRLP_parameters)
+
+Validates GPU-related parameters and adjusts settings if GPU is requested but not available.
+
+# Arguments
+- `params::HPRLP_parameters`: The solver parameters to validate
+
+# Behavior
+- If `use_gpu=true` but CUDA is not functional, sets `use_gpu=false` and warns user
+- If `use_gpu=true` but device_number is invalid, sets `use_gpu=false` and warns user
+- Validates that device_number is within valid range [0, num_devices-1]
+"""
+function validate_gpu_parameters!(params::HPRLP_parameters)
+    if params.use_gpu
+        # Check if CUDA is functional
+        if !CUDA.functional()
+            @warn "GPU requested but CUDA is not functional. Falling back to CPU execution."
+            params.use_gpu = false
+            return
+        end
+        
+        # Check if device_number is valid
+        num_devices = length(CUDA.devices())
+        if params.device_number < 0 || params.device_number >= num_devices
+            @warn "Invalid GPU device number $(params.device_number). Valid range is [0, $(num_devices-1)]. Falling back to CPU execution."
+            params.use_gpu = false
+            return
+        end
+    end
+end
+
 # the function to run the HPR-LP algorithm on a single file
 function run_file(FILE_NAME::String, params::HPRLP_parameters)
+    # Validate GPU parameters before proceeding
+    validate_gpu_parameters!(params)
+    
     t_start = time()
     if params.verbose
         println("READING FILE ... ", FILE_NAME)
@@ -317,6 +352,9 @@ function run_lp(A::SparseMatrixCSC,
     u::Vector{Float64},
     obj_constant::Float64,
     params::HPRLP_parameters)
+    
+    # Validate GPU parameters before proceeding
+    validate_gpu_parameters!(params)
     
     if params.warm_up
         if params.verbose

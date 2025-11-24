@@ -164,4 +164,60 @@ using LinearAlgebra
         @test isapprox(result.x[1], 1.0, atol=1e-3)
         @test isapprox(result.x[2], 0.0, atol=1e-3)
     end
+
+    @testset "GPU Parameter Validation" begin
+        # Test GPU fallback when invalid device number is specified
+        A = sparse([-1.0 -2.0; -3.0 -1.0])
+        AL = Vector{Float64}([-10.0, -12.0])
+        AU = Vector{Float64}([Inf, Inf])
+        c = Vector{Float64}([-3.0, -5.0])
+        l = Vector{Float64}([0.0, 0.0])
+        u = Vector{Float64}([Inf, Inf])
+        obj_constant = 0.0
+
+        @testset "Invalid GPU device number fallback" begin
+            params = HPRLP.HPRLP_parameters()
+            params.use_gpu = true
+            params.device_number = 999  # Invalid device number
+            params.warm_up = false
+            params.verbose = false
+            
+            # Should fall back to CPU without crashing
+            result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+            
+            @test result.output_type == "OPTIMAL"
+            @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+            # Verify that use_gpu was set to false after validation
+            @test params.use_gpu == false
+        end
+
+        @testset "Negative GPU device number fallback" begin
+            params = HPRLP.HPRLP_parameters()
+            params.use_gpu = true
+            params.device_number = -1  # Negative device number
+            params.warm_up = false
+            params.verbose = false
+            
+            # Should fall back to CPU without crashing
+            result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+            
+            @test result.output_type == "OPTIMAL"
+            @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+            # Verify that use_gpu was set to false after validation
+            @test params.use_gpu == false
+        end
+
+        @testset "CPU execution (use_gpu=false)" begin
+            params = HPRLP.HPRLP_parameters()
+            params.use_gpu = false
+            params.warm_up = false
+            params.verbose = false
+            
+            result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+            
+            @test result.output_type == "OPTIMAL"
+            @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+            @test params.use_gpu == false
+        end
+    end
 end

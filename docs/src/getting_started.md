@@ -6,17 +6,9 @@ Before using HPRLP, ensure you have:
 
 - **Julia** (version 1.10 or higher recommended)
 - **CUDA** (optional, for GPU acceleration)
-  - CUDA-capable GPU with compute capability 5.0 or higher
-  - CUDA Toolkit 11.0 or higher
+  - CUDA Toolkit 12.4 or higher for best compatibility
 
 ## Installation
-
-### From Julia General Registry (after registration)
-
-```julia
-using Pkg
-Pkg.add("HPRLP")
-```
 
 ### From GitHub
 
@@ -129,6 +121,16 @@ println("Solution: x₁ = ", value(x1), ", x₂ = ", value(x2))
 println("Solve time: ", solve_time(model), " seconds")
 ```
 
+### Solve the instance from MPS Files
+
+```julia
+using HPRLP
+
+# Simple solve with defaults
+params = HPRLP_parameters()
+result = run_single("model.mps", params)
+```
+
 ## Next Steps
 
 - Learn about [solving MPS files](guide/mps_files.md)
@@ -145,4 +147,4 @@ println("Solve time: ", solve_time(model), " seconds")
 
 3. **Scaling**: The default scaling methods (Ruiz and Pock-Chambolle) improve numerical stability. Keep them enabled unless you have specific reasons to disable them.
 
-4. **Tolerance**: The default `stoptol = 1e-4` balances accuracy and speed. Increase for tighter solutions or decrease for faster approximate solutions.
+4. **Tolerance**: The default `stoptol = 1e-4` is relatively loose. Increase for more accurate solutions in critical applications.
