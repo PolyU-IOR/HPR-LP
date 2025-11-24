@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Output &amp; Results · HPRLP.jl</title><meta name="title" content="Output &amp; Results · HPRLP.jl"/><meta property="og:title" content="Output &amp; Results · HPRLP.jl"/><meta property="twitter:title" content="Output &amp; Results · HPRLP.jl"/><meta name="description" content="Documentation for HPRLP.jl."/><meta property="og:description" content="Documentation for HPRLP.jl."/><meta property="twitter:description" content="Documentation for HPRLP.jl."/><meta property="og:url" content="https://PolyU-IOR.github.io/HPR-LP/guide/output_results/"/><meta property="twitter:url" content="https://PolyU-IOR.github.io/HPR-LP/guide/output_results/"/><link rel="canonical" href="https://PolyU-IOR.github.io/HPR-LP/guide/output_results/"/><script data-outdated-warner src="../../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL="../.."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../../assets/documenter.js"></script><script src="../../search_index.js"></script><script src="../../siteinfo.js"></script><script src="../../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../../">HPRLP.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../../">Home</a></li><li><a class="tocitem" href="../../getting_started/">Getting Started</a></li><li><span class="tocitem">User Guide</span><ul><li><input class="collapse-toggle" id="menuitem-3-1" type="checkbox"/><label class="tocitem" for="menuitem-3-1"><span class="docs-label">Input Methods</span><i class="docs-chevron"></i></label><ul class="collapsed"><li><a class="tocitem" href="../input_overview/">Overview</a></li><li><a class="tocitem" href="../direct_api/">Direct API</a></li><li><a class="tocitem" href="../jump_integration/">JuMP Integration</a></li><li><a class="tocitem" href="../mps_files/">MPS Files</a></li></ul></li><li><a class="tocitem" href="../parameters/">Parameters</a></li><li class="is-active"><a class="tocitem" href>Output &amp; Results</a><ul class="internal"><li><a class="tocitem" href="#Result-Fields-Summary"><span>Result Fields Summary</span></a></li><li><a class="tocitem" href="#Basic-Usage"><span>Basic Usage</span></a></li><li><a class="tocitem" href="#Result-Fields"><span>Result Fields</span></a></li><li><a class="tocitem" href="#Checking-Solution-Quality"><span>Checking Solution Quality</span></a></li><li><a class="tocitem" href="#Examples"><span>Examples</span></a></li><li><a class="tocitem" href="#Common-Issues"><span>Common Issues</span></a></li></ul></li></ul></li><li><a class="tocitem" href="../../api/">API Reference</a></li><li><a class="tocitem" href="../../examples/">Examples</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li><a class="is-disabled">User Guide</a></li><li class="is-active"><a href>Output &amp; Results</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Output &amp; Results</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/PolyU-IOR/HPR-LP" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/PolyU-IOR/HPR-LP/blob/main/docs/src/guide/output_results.md" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Output-and-Results"><a class="docs-heading-anchor" href="#Output-and-Results">Output &amp; Results</a><a id="Output-and-Results-1"></a><a class="docs-heading-anchor-permalink" href="#Output-and-Results" title="Permalink"></a></h1><p>This guide explains how to interpret the results returned by HPRLP solvers and understand the termination status.</p><h2 id="Result-Fields-Summary"><a class="docs-heading-anchor" href="#Result-Fields-Summary">Result Fields Summary</a><a id="Result-Fields-Summary-1"></a><a class="docs-heading-anchor-permalink" href="#Result-Fields-Summary" title="Permalink"></a></h2><p>All HPRLP solving functions return an <code>HPRLP_results</code> object with the following fields:</p><table><tr><th style="text-align: right">Field</th><th style="text-align: right">Type</th><th style="text-align: right">Description</th></tr><tr><td style="text-align: right"><code>output_type</code></td><td style="text-align: right">String</td><td style="text-align: right">Termination status: <code>&quot;OPTIMAL&quot;</code>, <code>&quot;MAX_ITER&quot;</code>, or <code>&quot;TIME_LIMIT&quot;</code></td></tr><tr><td style="text-align: right"><code>x</code></td><td style="text-align: right">Vector{Float64}</td><td style="text-align: right">Primal solution (decision variables)</td></tr><tr><td style="text-align: right"><code>y</code></td><td style="text-align: right">Vector{Float64}</td><td style="text-align: right">Dual variables for constraints</td></tr><tr><td style="text-align: right"><code>z</code></td><td style="text-align: right">Vector{Float64}</td><td style="text-align: right">Dual variables for bounds</td></tr><tr><td style="text-align: right"><code>primal_obj</code></td><td style="text-align: right">Float64</td><td style="text-align: right">Primal objective value (<span>$c^T x + c_0$</span>)</td></tr><tr><td style="text-align: right"><code>iter</code></td><td style="text-align: right">Int</td><td style="text-align: right">Total number of iterations</td></tr><tr><td style="text-align: right"><code>time</code></td><td style="text-align: right">Float64</td><td style="text-align: right">Total solve time (seconds)</td></tr><tr><td style="text-align: right"><code>iter_4</code>, <code>time_4</code></td><td style="text-align: right">Int, Float64</td><td style="text-align: right">Iterations/time to reach 1e-4 accuracy</td></tr><tr><td style="text-align: right"><code>iter_6</code>, <code>time_6</code></td><td style="text-align: right">Int, Float64</td><td style="text-align: right">Iterations/time to reach 1e-6 accuracy</td></tr><tr><td style="text-align: right"><code>iter_8</code>, <code>time_8</code></td><td style="text-align: right">Int, Float64</td><td style="text-align: right">Iterations/time to reach 1e-8 accuracy</td></tr><tr><td style="text-align: right"><code>residuals</code></td><td style="text-align: right">Float64</td><td style="text-align: right">Combined measure of constraint violations and objective gap</td></tr><tr><td style="text-align: right"><code>gap</code></td><td style="text-align: right">Float64</td><td style="text-align: right">Objective gap between primal and dual</td></tr></table><h2 id="Basic-Usage"><a class="docs-heading-anchor" href="#Basic-Usage">Basic Usage</a><a id="Basic-Usage-1"></a><a class="docs-heading-anchor-permalink" href="#Basic-Usage" title="Permalink"></a></h2><pre><code class="language-julia hljs">result = run_lp(A, AL, AU, c, l, u, c0, params)
+
+# Access results
+println(&quot;Status: &quot;, result.output_type)
+println(&quot;Objective: &quot;, result.primal_obj)
+println(&quot;Solution: &quot;, result.x)
+println(&quot;Time: &quot;, result.time, &quot; seconds&quot;)</code></pre><h2 id="Result-Fields"><a class="docs-heading-anchor" href="#Result-Fields">Result Fields</a><a id="Result-Fields-1"></a><a class="docs-heading-anchor-permalink" href="#Result-Fields" title="Permalink"></a></h2><h3 id="Termination-Status"><a class="docs-heading-anchor" href="#Termination-Status">Termination Status</a><a id="Termination-Status-1"></a><a class="docs-heading-anchor-permalink" href="#Termination-Status" title="Permalink"></a></h3><h4 id="output_type::String"><a class="docs-heading-anchor" href="#output_type::String"><code>output_type::String</code></a><a id="output_type::String-1"></a><a class="docs-heading-anchor-permalink" href="#output_type::String" title="Permalink"></a></h4><p>Indicates why the solver stopped:</p><ul><li><strong><code>&quot;OPTIMAL&quot;</code></strong> - Successfully found an optimal solution within tolerance</li><li><strong><code>&quot;MAX_ITER&quot;</code></strong> - Reached maximum iteration limit before converging</li><li><strong><code>&quot;TIME_LIMIT&quot;</code></strong> - Reached time limit before converging</li></ul><pre><code class="language-julia hljs">if result.output_type == &quot;OPTIMAL&quot;
+    println(&quot;✓ Optimal solution found!&quot;)
+    println(&quot;Objective value: &quot;, result.primal_obj)
+elseif result.output_type == &quot;MAX_ITER&quot;
+    println(&quot;⚠ Iteration limit reached&quot;)
+    println(&quot;Best objective: &quot;, result.primal_obj)
+    println(&quot;Residual: &quot;, result.residuals)
+elseif result.output_type == &quot;TIME_LIMIT&quot;
+    println(&quot;⚠ Time limit reached&quot;)
+    println(&quot;Best objective: &quot;, result.primal_obj)
+end</code></pre><h3 id="Solution-Vectors"><a class="docs-heading-anchor" href="#Solution-Vectors">Solution Vectors</a><a id="Solution-Vectors-1"></a><a class="docs-heading-anchor-permalink" href="#Solution-Vectors" title="Permalink"></a></h3><h4 id="x::Vector{Float64}"><a class="docs-heading-anchor" href="#x::Vector{Float64}"><code>x::Vector{Float64}</code></a><a id="x::Vector{Float64}-1"></a><a class="docs-heading-anchor-permalink" href="#x::Vector{Float64}" title="Permalink"></a></h4><p>The primal solution vector (decision variables).</p><pre><code class="language-julia hljs"># Access solution values
+println(&quot;x₁ = &quot;, result.x[1])
+println(&quot;x₂ = &quot;, result.x[2])
+
+# Use in calculations
+optimal_cost = sum(c .* result.x)</code></pre><h4 id="y::Vector{Float64}"><a class="docs-heading-anchor" href="#y::Vector{Float64}"><code>y::Vector{Float64}</code></a><a id="y::Vector{Float64}-1"></a><a class="docs-heading-anchor-permalink" href="#y::Vector{Float64}" title="Permalink"></a></h4><p>The dual variables for constraints.</p><h4 id="z::Vector{Float64}"><a class="docs-heading-anchor" href="#z::Vector{Float64}"><code>z::Vector{Float64}</code></a><a id="z::Vector{Float64}-1"></a><a class="docs-heading-anchor-permalink" href="#z::Vector{Float64}" title="Permalink"></a></h4><p>The dual variables for bound constraints (reduced costs).</p><h3 id="Objective-Values"><a class="docs-heading-anchor" href="#Objective-Values">Objective Values</a><a id="Objective-Values-1"></a><a class="docs-heading-anchor-permalink" href="#Objective-Values" title="Permalink"></a></h3><h4 id="primal_obj::Float64"><a class="docs-heading-anchor" href="#primal_obj::Float64"><code>primal_obj::Float64</code></a><a id="primal_obj::Float64-1"></a><a class="docs-heading-anchor-permalink" href="#primal_obj::Float64" title="Permalink"></a></h4><p>The primal objective value: <span>$c^T x + c_0$</span></p><pre><code class="language-julia hljs">println(&quot;Optimal cost: &quot;, result.primal_obj)</code></pre><h3 id="Performance-Metrics"><a class="docs-heading-anchor" href="#Performance-Metrics">Performance Metrics</a><a id="Performance-Metrics-1"></a><a class="docs-heading-anchor-permalink" href="#Performance-Metrics" title="Permalink"></a></h3><h4 id="iter::Int"><a class="docs-heading-anchor" href="#iter::Int"><code>iter::Int</code></a><a id="iter::Int-1"></a><a class="docs-heading-anchor-permalink" href="#iter::Int" title="Permalink"></a></h4><p>Total number of iterations performed.</p><pre><code class="language-julia hljs">println(&quot;Solved in &quot;, result.iter, &quot; iterations&quot;)</code></pre><h4 id="time::Float64"><a class="docs-heading-anchor" href="#time::Float64"><code>time::Float64</code></a><a id="time::Float64-1"></a><a class="docs-heading-anchor-permalink" href="#time::Float64" title="Permalink"></a></h4><p>Total solve time in seconds (excluding setup and scaling).</p><pre><code class="language-julia hljs">println(&quot;Solve time: &quot;, result.time, &quot; seconds&quot;)</code></pre><h4 id="Accuracy-Milestones"><a class="docs-heading-anchor" href="#Accuracy-Milestones">Accuracy Milestones</a><a id="Accuracy-Milestones-1"></a><a class="docs-heading-anchor-permalink" href="#Accuracy-Milestones" title="Permalink"></a></h4><p>HPRLP tracks when certain accuracy levels are reached:</p><ul><li><code>iter_4</code>, <code>time_4</code> - Iterations/time to reach 1e-4 accuracy</li><li><code>iter_6</code>, <code>time_6</code> - Iterations/time to reach 1e-6 accuracy  </li><li><code>iter_8</code>, <code>time_8</code> - Iterations/time to reach 1e-8 accuracy</li></ul><pre><code class="language-julia hljs">if result.time_6 &lt; params.time_limit
+    println(&quot;Reached 1e-6 accuracy in &quot;, result.iter_6, &quot; iterations&quot;)
+    println(&quot;Time to 1e-6: &quot;, result.time_6, &quot; seconds&quot;)
+end</code></pre><h3 id="Quality-Metrics"><a class="docs-heading-anchor" href="#Quality-Metrics">Quality Metrics</a><a id="Quality-Metrics-1"></a><a class="docs-heading-anchor-permalink" href="#Quality-Metrics" title="Permalink"></a></h3><h4 id="residuals::Float64"><a class="docs-heading-anchor" href="#residuals::Float64"><code>residuals::Float64</code></a><a id="residuals::Float64-1"></a><a class="docs-heading-anchor-permalink" href="#residuals::Float64" title="Permalink"></a></h4><p>Combined measure of constraint violations and objective gap. Lower is better.</p><pre><code class="language-julia hljs">println(&quot;Final residual: &quot;, result.residuals)</code></pre><h4 id="gap::Float64"><a class="docs-heading-anchor" href="#gap::Float64"><code>gap::Float64</code></a><a id="gap::Float64-1"></a><a class="docs-heading-anchor-permalink" href="#gap::Float64" title="Permalink"></a></h4><p>Objective gap between primal and dual solutions.</p><pre><code class="language-julia hljs">println(&quot;Objective gap: &quot;, result.gap)</code></pre><h2 id="Checking-Solution-Quality"><a class="docs-heading-anchor" href="#Checking-Solution-Quality">Checking Solution Quality</a><a id="Checking-Solution-Quality-1"></a><a class="docs-heading-anchor-permalink" href="#Checking-Solution-Quality" title="Permalink"></a></h2><h3 id="Optimal-Solutions"><a class="docs-heading-anchor" href="#Optimal-Solutions">Optimal Solutions</a><a id="Optimal-Solutions-1"></a><a class="docs-heading-anchor-permalink" href="#Optimal-Solutions" title="Permalink"></a></h3><pre><code class="language-julia hljs">function check_solution_quality(result, params)
+    if result.output_type != &quot;OPTIMAL&quot;
+        @warn &quot;Solution not optimal: $(result.output_type)&quot;
+    end
+    
+    if result.residuals &gt; params.stoptol
+        @warn &quot;Residuals exceed tolerance: $(result.residuals) &gt; $(params.stoptol)&quot;
+    end
+    
+    if result.gap &gt; 1e-3
+        @warn &quot;Large objective gap: $(result.gap)&quot;
+    end
+    
+    return result.output_type == &quot;OPTIMAL&quot; &amp;&amp; 
+           result.residuals &lt;= params.stoptol
+end</code></pre><h3 id="Verifying-Feasibility"><a class="docs-heading-anchor" href="#Verifying-Feasibility">Verifying Feasibility</a><a id="Verifying-Feasibility-1"></a><a class="docs-heading-anchor-permalink" href="#Verifying-Feasibility" title="Permalink"></a></h3><pre><code class="language-julia hljs">function verify_primal_feasibility(result, A, AL, AU, l, u)
+    x = result.x
+    
+    # Check variable bounds
+    if any(x .&lt; l .- 1e-6) || any(x .&gt; u .+ 1e-6)
+        @warn &quot;Variable bounds violated&quot;
+        return false
+    end
+    
+    # Check constraint bounds
+    Ax = A * x
+    if any(Ax .&lt; AL .- 1e-6) || any(Ax .&gt; AU .+ 1e-6)
+        @warn &quot;Constraint bounds violated&quot;
+        return false
+    end
+    
+    println(&quot;✓ Solution is feasible&quot;)
+    return true
+end</code></pre><h2 id="Examples"><a class="docs-heading-anchor" href="#Examples">Examples</a><a id="Examples-1"></a><a class="docs-heading-anchor-permalink" href="#Examples" title="Permalink"></a></h2><h3 id="Basic-Usage-2"><a class="docs-heading-anchor" href="#Basic-Usage-2">Basic Usage</a><a class="docs-heading-anchor-permalink" href="#Basic-Usage-2" title="Permalink"></a></h3><pre><code class="language-julia hljs">using HPRLP
+
+params = HPRLP_parameters()
+result = run_single(&quot;problem.mps&quot;, params)
+
+println(&quot;═══════ Solution Summary ═══════&quot;)
+println(&quot;Status:     &quot;, result.output_type)
+println(&quot;Objective:  &quot;, result.primal_obj)
+println(&quot;Iterations: &quot;, result.iter)
+println(&quot;Time:       &quot;, round(result.time, digits=3), &quot; sec&quot;)
+println(&quot;Residual:   &quot;, result.residuals)
+println(&quot;════════════════════════════════&quot;)</code></pre><h3 id="Detailed-Analysis"><a class="docs-heading-anchor" href="#Detailed-Analysis">Detailed Analysis</a><a id="Detailed-Analysis-1"></a><a class="docs-heading-anchor-permalink" href="#Detailed-Analysis" title="Permalink"></a></h3><pre><code class="language-julia hljs">function analyze_results(result, params)
+    println(&quot;\n&quot; * &quot;=&quot;^50)
+    println(&quot;HPRLP Solution Analysis&quot;)
+    println(&quot;=&quot;^50)
+    
+    # Termination status
+    println(&quot;\n[Termination]&quot;)
+    println(&quot;  Status: &quot;, result.output_type)
+    
+    # Objective information
+    println(&quot;\n[Objective]&quot;)
+    println(&quot;  Primal: &quot;, result.primal_obj)
+    println(&quot;  Gap:    &quot;, result.gap)
+    
+    # Performance
+    println(&quot;\n[Performance]&quot;)
+    println(&quot;  Iterations: &quot;, result.iter)
+    println(&quot;  Time:       &quot;, round(result.time, digits=3), &quot; seconds&quot;)
+    
+    # Accuracy milestones
+    println(&quot;\n[Accuracy Milestones]&quot;)
+    if result.iter_4 &gt; 0
+        println(&quot;  1e-4: &quot;, result.iter_4, &quot; iterations, &quot;, 
+                round(result.time_4, digits=3), &quot; sec&quot;)
+    end
+    if result.iter_6 &gt; 0
+        println(&quot;  1e-6: &quot;, result.iter_6, &quot; iterations, &quot;, 
+                round(result.time_6, digits=3), &quot; sec&quot;)
+    end
+    if result.iter_8 &gt; 0
+        println(&quot;  1e-8: &quot;, result.iter_8, &quot; iterations, &quot;, 
+                round(result.time_8, digits=3), &quot; sec&quot;)
+    end
+    
+    # Quality assessment
+    println(&quot;\n[Solution Quality]&quot;)
+    println(&quot;  Residual:  &quot;, result.residuals)
+    println(&quot;  Tolerance: &quot;, params.stoptol)
+    
+    quality = if result.residuals &lt; params.stoptol / 10
+        &quot;Excellent&quot;
+    elseif result.residuals &lt; params.stoptol
+        &quot;Good&quot;
+    elseif result.residuals &lt; params.stoptol * 10
+        &quot;Acceptable&quot;
+    else
+        &quot;Poor&quot;
+    end
+    println(&quot;  Quality:   &quot;, quality)
+    
+    println(&quot;=&quot;^50 * &quot;\n&quot;)
+end
+
+# Usage
+result = run_single(&quot;model.mps&quot;, params)
+analyze_results(result, params)</code></pre><h3 id="Comparing-Solutions"><a class="docs-heading-anchor" href="#Comparing-Solutions">Comparing Solutions</a><a id="Comparing-Solutions-1"></a><a class="docs-heading-anchor-permalink" href="#Comparing-Solutions" title="Permalink"></a></h3><pre><code class="language-julia hljs">function compare_results(result1, result2, label1=&quot;Result 1&quot;, label2=&quot;Result 2&quot;)
+    println(&quot;\n&quot;, &quot;=&quot;^60)
+    println(&quot;Solution Comparison&quot;)
+    println(&quot;=&quot;^60)
+    
+    println(&quot;\n&quot;, rpad(&quot;Metric&quot;, 20), rpad(label1, 20), label2)
+    println(&quot;-&quot;^60)
+    
+    println(rpad(&quot;Status&quot;, 20), 
+            rpad(result1.output_type, 20), result2.output_type)
+    println(rpad(&quot;Objective&quot;, 20), 
+            rpad(string(round(result1.primal_obj, digits=6)), 20),
+            round(result2.primal_obj, digits=6))
+    println(rpad(&quot;Iterations&quot;, 20), 
+            rpad(string(result1.iter), 20), result2.iter)
+    println(rpad(&quot;Time (sec)&quot;, 20), 
+            rpad(string(round(result1.time, digits=3)), 20),
+            round(result2.time, digits=3))
+    println(rpad(&quot;Residual&quot;, 20), 
+            rpad(string(result1.residuals), 20), result2.residuals)
+    
+    println(&quot;=&quot;^60 * &quot;\n&quot;)
+end
+
+# Usage: Compare GPU vs CPU
+params_gpu = HPRLP_parameters()
+params_gpu.use_gpu = true
+
+params_cpu = HPRLP_parameters()
+params_cpu.use_gpu = false
+
+result_gpu = run_single(&quot;model.mps&quot;, params_gpu)
+result_cpu = run_single(&quot;model.mps&quot;, params_cpu)
+
+compare_results(result_gpu, result_cpu, &quot;GPU&quot;, &quot;CPU&quot;)</code></pre><h2 id="Common-Issues"><a class="docs-heading-anchor" href="#Common-Issues">Common Issues</a><a id="Common-Issues-1"></a><a class="docs-heading-anchor-permalink" href="#Common-Issues" title="Permalink"></a></h2><h3 id="Non-Optimal-Termination"><a class="docs-heading-anchor" href="#Non-Optimal-Termination">Non-Optimal Termination</a><a id="Non-Optimal-Termination-1"></a><a class="docs-heading-anchor-permalink" href="#Non-Optimal-Termination" title="Permalink"></a></h3><p>If solver stops with <code>MAX_ITER</code> or <code>TIME_LIMIT</code>:</p><pre><code class="language-julia hljs">if result.output_type != &quot;OPTIMAL&quot;
+    # Check if close to optimal
+    if result.residuals &lt; 1e-3
+        println(&quot;Near-optimal solution found&quot;)
+        println(&quot;Consider increasing time_limit or max_iter&quot;)
+    else
+        println(&quot;Poor solution quality&quot;)
+        println(&quot;Problem may be ill-conditioned&quot;)
+        println(&quot;Try adjusting scaling parameters&quot;)
+    end
+end</code></pre><h3 id="Large-Residuals"><a class="docs-heading-anchor" href="#Large-Residuals">Large Residuals</a><a id="Large-Residuals-1"></a><a class="docs-heading-anchor-permalink" href="#Large-Residuals" title="Permalink"></a></h3><pre><code class="language-julia hljs">if result.residuals &gt; params.stoptol * 100
+    @warn &quot;Very large residuals - possible issues:&quot;
+    println(&quot;  - Problem may be infeasible or unbounded&quot;)
+    println(&quot;  - Numerical scaling issues&quot;)
+    println(&quot;  - Try enabling all scaling options&quot;)
+    println(&quot;  - Check problem formulation&quot;)
+end</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../parameters/">« Parameters</a><a class="docs-footer-nextpage" href="../../api/">API Reference »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.16.0 on <span class="colophon-date" title="Monday 24 November 2025 04:17">Monday 24 November 2025</span>. Using Julia version 1.10.10.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
