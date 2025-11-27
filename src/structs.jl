@@ -29,6 +29,10 @@ Parameters for the HPR-LP solver.
 - `warm_up::Bool`: Enable warm-up phase (default: true)
 - `print_frequency::Int`: Print log every N iterations, -1 for auto (default: -1)
 - `verbose::Bool`: Enable verbose output (default: true)
+- `initial_x::Union{Vector{Float64},Nothing}`: Initial primal solution (default: nothing)
+- `initial_y::Union{Vector{Float64},Nothing}`: Initial dual solution (default: nothing)
+- `auto_save::Bool`: Automatically save best x, y, and sigma during optimization (default: false)
+- `save_filename::String`: Filename for auto-save HDF5 file (default: "hprlp_autosave.h5")
 
 # Example
 ```julia
@@ -36,6 +40,11 @@ params = HPRLP_parameters()
 params.stoptol = 1e-6
 params.use_gpu = false
 params.verbose = false
+params.auto_save = true
+params.save_filename = "my_optimization.h5"
+# Provide initial point
+params.initial_x = x0
+params.initial_y = y0
 ```
 """
 mutable struct HPRLP_parameters
@@ -75,8 +84,20 @@ mutable struct HPRLP_parameters
     # whether to print verbose output, default is true
     verbose::Bool
 
+    # initial primal solution, default is nothing
+    initial_x::Union{Vector{Float64},Nothing}
+
+    # initial dual solution, default is nothing
+    initial_y::Union{Vector{Float64},Nothing}
+
+    # whether to automatically save the best x, y, and sigma, default is false
+    auto_save::Bool
+
+    # filename for auto-save HDF5 file, default is "hprlp_autosave.h5"
+    save_filename::String
+
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, 0, true, -1, true)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, 0, true, -1, true, nothing, nothing, false, "hprlp_autosave.h5")
 end
 
 """
@@ -103,7 +124,9 @@ Results from the HPR-LP solver.
 
 # Example
 ```julia
-results = run_lp(A, b, c, l, u)
+model = build_from_mps("problem.mps")
+params = HPRLP_parameters()
+results = solve(model, params)
 println("Status: ", results.status)
 println("Objective: ", results.primal_obj)
 println("Time: ", results.time, " seconds")
@@ -151,7 +174,7 @@ mutable struct HPRLP_results
     # OPTIMAL: the algorithm finds the optimal solution
     # MAX_ITER: the algorithm reaches the maximum number of iterations
     # TIME_LIMIT: the algorithm reaches the time limit
-    output_type::String
+    status::String
 
     # The vector x
     x::Vector{Float64}
@@ -194,6 +217,71 @@ mutable struct CUSPARSE_spmv_AT
     compute_type::DataType
     alg::CUDA.CUSPARSE.cusparseSpMVAlg_t
     buf::CuArray{UInt8}
+end
+
+# Define the saved state structure for auto_save feature
+mutable struct HPRLP_saved_state_gpu
+    # Best x found so far (GPU)
+    save_x::CuVector{Float64}
+    
+    # Best y found so far (GPU)
+    save_y::CuVector{Float64}
+    
+    # Best sigma value
+    save_sigma::Float64
+    
+    # Iteration when best state was saved
+    save_iter::Int
+    
+    # Primal residual at best state
+    save_err_Rp::Float64
+    
+    # Dual residual at best state
+    save_err_Rd::Float64
+    
+    # Primal objective at best state
+    save_primal_obj::Float64
+    
+    # Dual objective at best state
+    save_dual_obj::Float64
+    
+    # Relative gap at best state
+    save_rel_gap::Float64
+    
+    # Default constructor
+    HPRLP_saved_state_gpu() = new()
+end
+
+mutable struct HPRLP_saved_state_cpu
+    # Best x found so far (CPU)
+    save_x::Vector{Float64}
+    
+    # Best y found so far (CPU)
+    save_y::Vector{Float64}
+    
+    # Best sigma value
+    save_sigma::Float64
+    
+    # Iteration when best state was saved
+    save_iter::Int
+    
+    # Primal residual at best state
+    save_err_Rp::Float64
+    
+    # Dual residual at best state
+    save_err_Rd::Float64
+    
+    # Primal objective at best state
+    save_primal_obj::Float64
+    
+    # Dual objective at best state
+    save_dual_obj::Float64
+    
+    # Relative gap at best state
+    save_rel_gap::Float64
+    
+    # Default constructor
+    HPRLP_saved_state_cpu() = new()
 end
 
 # Define the workspace for the HPR-LP algorithm
@@ -288,6 +376,12 @@ mutable struct HPRLP_workspace_gpu
     # Normally used to indicate whether the termination conditions should be checked
     to_check::Bool
 
+    # Saved state for auto_save feature
+    saved_state::HPRLP_saved_state_gpu
+    
+    # Flag to indicate if backup file has been created in this session
+    backup_created::Bool
+
     # Default constructor
     HPRLP_workspace_gpu() = new()
 end
@@ -321,6 +415,7 @@ mutable struct HPRLP_workspace_cpu
     last_x::Vector{Float64}
     last_y::Vector{Float64}
     to_check::Bool
+    saved_state::HPRLP_saved_state_cpu
     HPRLP_workspace_cpu() = new()
 end
 

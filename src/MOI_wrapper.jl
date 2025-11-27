@@ -326,8 +326,9 @@ function MOI.optimize!(dest::Optimizer, src::OptimizerCache)
         dest.params.verbose = false
     end
     
-    # Run the HPRLP solver
-    dest.results = run_lp(A_sparse, AL, AU, c, l, u, obj_constant, dest.params)
+    # Build model and optimize using new API
+    model = build_from_Abc(A_sparse, c, AL, AU, l, u, obj_constant)
+    dest.results = optimize(model, dest.params)
     
     return
 end
@@ -381,11 +382,11 @@ function MOI.get(model::Optimizer, ::MOI.TerminationStatus)
         return MOI.OPTIMIZE_NOT_CALLED
     end
     
-    if model.results.output_type == "OPTIMAL"
+    if model.results.status == "OPTIMAL"
         return MOI.OPTIMAL
-    elseif model.results.output_type == "MAX_ITER"
+    elseif model.results.status == "MAX_ITER"
         return MOI.ITERATION_LIMIT
-    elseif model.results.output_type == "TIME_LIMIT"
+    elseif model.results.status == "TIME_LIMIT"
         return MOI.TIME_LIMIT
     else
         return MOI.OTHER_ERROR
@@ -396,7 +397,7 @@ function MOI.get(model::Optimizer, ::MOI.RawStatusString)
     if model.results === nothing
         return "OPTIMIZE_NOT_CALLED"
     end
-    return model.results.output_type
+    return model.results.status
 end
 
 function MOI.get(model::Optimizer, ::MOI.ResultCount)
@@ -404,7 +405,7 @@ function MOI.get(model::Optimizer, ::MOI.ResultCount)
         return 0
     end
     # HPRLP always returns a result if it has run
-    return model.results.output_type == "OPTIMAL" ? 1 : 0
+    return model.results.status == "OPTIMAL" ? 1 : 0
 end
 
 function MOI.get(model::Optimizer, attr::MOI.PrimalStatus)
@@ -414,7 +415,7 @@ function MOI.get(model::Optimizer, attr::MOI.PrimalStatus)
     if model.results === nothing
         return MOI.NO_SOLUTION
     end
-    if model.results.output_type == "OPTIMAL"
+    if model.results.status == "OPTIMAL"
         return MOI.FEASIBLE_POINT
     end
     return MOI.UNKNOWN_RESULT_STATUS
@@ -427,7 +428,7 @@ function MOI.get(model::Optimizer, attr::MOI.DualStatus)
     if model.results === nothing
         return MOI.NO_SOLUTION
     end
-    if model.results.output_type == "OPTIMAL"
+    if model.results.status == "OPTIMAL"
         return MOI.FEASIBLE_POINT
     end
     return MOI.UNKNOWN_RESULT_STATUS

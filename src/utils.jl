@@ -37,7 +37,7 @@ function formulation(lp, verbose::Bool=true)
     return standard_lp
 end
 
-# the scaling function for the LP problem
+# Helper function to create scaling info and apply scaling to the LP problem
 function scaling!(lp::LP_info_cpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_scaling::Bool, use_bc_scaling::Bool)
     m, n = size(lp.A)
     row_norm = ones(m)
@@ -124,6 +124,217 @@ function scaling!(lp::LP_info_cpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_sc
     return scaling_info
 end
 
+# GPU-based scaling function for the LP problem
+function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_scaling::Bool, use_bc_scaling::Bool)
+    m = size(lp.A, 1)
+    n = size(lp.A, 2)
+    
+    # Initialize scaling vectors on GPU
+    row_norm = CUDA.ones(Float64, m)
+    col_norm = CUDA.ones(Float64, n)
+    
+    # Compute original norms for scaling info
+    AL_nInf = copy(lp.AL)
+    AU_nInf = copy(lp.AU)
+    AL_nInf[lp.AL.==-Inf] .= 0.0
+    AU_nInf[lp.AU.==Inf] .= 0.0
+    norm_b_org = 1 + CUDA.norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
+    norm_c_org = 1 + CUDA.norm(lp.c)
+    
+    # Initialize scaling info
+    scaling_info = Scaling_info_gpu(
+        copy(lp.l), copy(lp.u), 
+        row_norm, col_norm, 
+        1.0, 1.0, 1.0, 1.0, 
+        norm_b_org, norm_c_org
+    )
+    
+    # Get CSR matrix components
+    A_rowPtr = lp.A.rowPtr
+    A_colVal = lp.A.colVal
+    A_nzVal = lp.A.nzVal
+    AT_rowPtr = lp.AT.rowPtr
+    AT_colVal = lp.AT.colVal
+    AT_nzVal = lp.AT.nzVal
+    
+    # Temporary vectors for scaling
+    temp_row_norm = CUDA.ones(Float64, m)
+    temp_col_norm = CUDA.ones(Float64, n)
+    
+    # Ruiz scaling
+    if use_Ruiz_scaling
+        for _ in 1:10
+            # Compute row-wise max of |A|
+            @cuda threads=256 blocks=ceil(Int, m/256) compute_row_max_abs_kernel!(
+                A_rowPtr, A_nzVal, temp_row_norm, m
+            )
+            CUDA.synchronize()
+            
+            # Compute column-wise max of |A| (via AT)
+            @cuda threads=256 blocks=ceil(Int, n/256) compute_col_max_abs_kernel!(
+                AT_rowPtr, AT_nzVal, temp_col_norm, n
+            )
+            CUDA.synchronize()
+            
+            # Update cumulative norms
+            row_norm .*= temp_row_norm
+            col_norm .*= temp_col_norm
+            
+            # Scale A: A = DA * A * EA (rows by temp_row_norm, cols by temp_col_norm)
+            @cuda threads=256 blocks=ceil(Int, m/256) scale_rows_csr_kernel!(
+                A_rowPtr, A_nzVal, temp_row_norm, m
+            )
+            CUDA.synchronize()
+            
+            @cuda threads=256 blocks=ceil(Int, m/256) scale_csr_cols_kernel!(
+                A_rowPtr, A_colVal, A_nzVal, temp_col_norm, m
+            )
+            CUDA.synchronize()
+            
+            # Scale AT: AT = EA * AT * DA (rows by temp_col_norm, cols by temp_row_norm)
+            @cuda threads=256 blocks=ceil(Int, n/256) scale_rows_csr_kernel!(
+                AT_rowPtr, AT_nzVal, temp_col_norm, n
+            )
+            CUDA.synchronize()
+            
+            @cuda threads=256 blocks=ceil(Int, n/256) scale_csr_cols_kernel!(
+                AT_rowPtr, AT_colVal, AT_nzVal, temp_row_norm, n
+            )
+            CUDA.synchronize()
+            
+            # Scale constraint bounds
+            @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_div_kernel!(
+                lp.AL, temp_row_norm, m
+            )
+            @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_div_kernel!(
+                lp.AU, temp_row_norm, m
+            )
+            CUDA.synchronize()
+            
+            # Scale objective and variable bounds
+            @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_div_kernel!(
+                lp.c, temp_col_norm, n
+            )
+            @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_mul_kernel!(
+                lp.l, temp_col_norm, n
+            )
+            @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_mul_kernel!(
+                lp.u, temp_col_norm, n
+            )
+            CUDA.synchronize()
+        end
+    end
+    
+    # Pock-Chambolle scaling
+    if use_Pock_Chambolle_scaling
+        # Compute row-wise sum of |A|
+        @cuda threads=256 blocks=ceil(Int, m/256) compute_row_sum_abs_kernel!(
+            A_rowPtr, A_nzVal, temp_row_norm, m
+        )
+        CUDA.synchronize()
+        
+        # Compute column-wise sum of |A| (via AT)
+        @cuda threads=256 blocks=ceil(Int, n/256) compute_col_sum_abs_kernel!(
+            AT_rowPtr, AT_nzVal, temp_col_norm, n
+        )
+        CUDA.synchronize()
+        
+        # Update cumulative norms
+        row_norm .*= temp_row_norm
+        col_norm .*= temp_col_norm
+        
+        # Scale A: A = DA * A * EA (rows by temp_row_norm, cols by temp_col_norm)
+        @cuda threads=256 blocks=ceil(Int, m/256) scale_rows_csr_kernel!(
+            A_rowPtr, A_nzVal, temp_row_norm, m
+        )
+        CUDA.synchronize()
+        
+        @cuda threads=256 blocks=ceil(Int, m/256) scale_csr_cols_kernel!(
+            A_rowPtr, A_colVal, A_nzVal, temp_col_norm, m
+        )
+        CUDA.synchronize()
+        
+        # Scale AT: AT = EA * AT * DA (rows by temp_col_norm, cols by temp_row_norm)
+        @cuda threads=256 blocks=ceil(Int, n/256) scale_rows_csr_kernel!(
+            AT_rowPtr, AT_nzVal, temp_col_norm, n
+        )
+        CUDA.synchronize()
+        
+        @cuda threads=256 blocks=ceil(Int, n/256) scale_csr_cols_kernel!(
+            AT_rowPtr, AT_colVal, AT_nzVal, temp_row_norm, n
+        )
+        CUDA.synchronize()
+        
+        # Scale constraint bounds
+        @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_div_kernel!(
+            lp.AL, temp_row_norm, m
+        )
+        @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_div_kernel!(
+            lp.AU, temp_row_norm, m
+        )
+        CUDA.synchronize()
+        
+        # Scale objective and variable bounds
+        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_div_kernel!(
+            lp.c, temp_col_norm, n
+        )
+        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_mul_kernel!(
+            lp.l, temp_col_norm, n
+        )
+        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_mul_kernel!(
+            lp.u, temp_col_norm, n
+        )
+        CUDA.synchronize()
+    end
+    
+    # b and c scaling
+    if use_bc_scaling
+        AL_nInf = copy(lp.AL)
+        AU_nInf = copy(lp.AU)
+        AL_nInf[lp.AL.==-Inf] .= 0.0
+        AU_nInf[lp.AU.==Inf] .= 0.0
+        b_scale = 1 + CUDA.norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
+        c_scale = 1 + CUDA.norm(lp.c)
+        
+        @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_scalar_div_kernel!(
+            lp.AL, b_scale, m
+        )
+        @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_scalar_div_kernel!(
+            lp.AU, b_scale, m
+        )
+        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_scalar_div_kernel!(
+            lp.c, c_scale, n
+        )
+        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_scalar_div_kernel!(
+            lp.l, b_scale, n
+        )
+        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_scalar_div_kernel!(
+            lp.u, b_scale, n
+        )
+        CUDA.synchronize()
+        
+        scaling_info.b_scale = b_scale
+        scaling_info.c_scale = c_scale
+    else
+        scaling_info.b_scale = 1.0
+        scaling_info.c_scale = 1.0
+    end
+    
+    # Compute final norms
+    AL_nInf = copy(lp.AL)
+    AU_nInf = copy(lp.AU)
+    AL_nInf[lp.AL.==-Inf] .= 0.0
+    AU_nInf[lp.AU.==Inf] .= 0.0
+    scaling_info.norm_b = CUDA.norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
+    scaling_info.norm_c = CUDA.norm(lp.c)
+    
+    # Store the cumulative scaling norms
+    scaling_info.row_norm = row_norm
+    scaling_info.col_norm = col_norm
+    
+    return scaling_info
+end
+
 function power_iteration_gpu(spmv_A::CUSPARSE_spmv_A, spmv_AT::CUSPARSE_spmv_AT, m::Int, n::Int,
     max_iterations::Int=5000, tolerance::Float64=1e-4)
     seed = 1
@@ -207,258 +418,121 @@ function validate_gpu_parameters!(params::HPRLP_parameters)
     end
 end
 
-# the function to run the HPR-LP algorithm on a single file
-function run_file(FILE_NAME::String, params::HPRLP_parameters)
-    # Validate GPU parameters before proceeding
-    validate_gpu_parameters!(params)
-    
+"""
+    build_from_mps(filename; verbose=true)
+
+Build an LP model from an MPS file.
+
+# Arguments
+- `filename::String`: Path to the .mps file
+- `verbose::Bool`: Enable verbose output (default: true)
+
+# Returns
+- `LP_info_cpu`: LP model ready to be solved
+
+# Example
+```julia
+using HPRLP
+
+model = build_from_mps("problem.mps")
+params = HPRLP_parameters()
+result = solve(model, params)
+```
+
+See also: [`build_from_Abc`](@ref), [`solve`](@ref)
+"""
+function build_from_mps(filename::String; verbose::Bool=true)
     t_start = time()
-    if params.verbose
-        println("READING FILE ... ", FILE_NAME)
+    if verbose
+        println("READING FILE ... ", filename)
     end
-    io = open(FILE_NAME)
+    io = open(filename)
     lp = Logging.with_logger(Logging.NullLogger()) do
         readqps(io, mpsformat=:free)
     end
     close(io)
     read_time = time() - t_start
-    if params.verbose
+    if verbose
         println(@sprintf("READING FILE time: %.2f seconds", read_time))
     end
 
     t_start = time()
-    setup_start = time()
-    if params.verbose
+    if verbose
         println("FORMULATING LP ...")
     end
-    standard_lp = formulation(lp, params.verbose)
-    if params.verbose
+    standard_lp = formulation(lp, verbose)
+    if verbose
         println(@sprintf("FORMULATING LP time: %.2f seconds", time() - t_start))
     end
 
-    if params.use_gpu
-        CUDA.device!(params.device_number)
-        t_start = time()
-        if params.verbose
-            println("SCALING LP ...")
-        end
-        scaling_info = scaling!(standard_lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
-        if params.verbose
-            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
-        end
-
-        CUDA.synchronize()
-        t_start = time()
-        if params.verbose
-            println("COPY TO GPU ...")
-        end
-        standard_lp_gpu = LP_info_gpu(CuSparseMatrixCSR(standard_lp.A),
-            CuSparseMatrixCSR(standard_lp.A'),
-            CuVector(standard_lp.c),
-            CuVector(standard_lp.AL),
-            CuVector(standard_lp.AU),
-            CuVector(standard_lp.l),
-            CuVector(standard_lp.u),
-            standard_lp.obj_constant,
-        )
-        scaling_info_gpu = Scaling_info_gpu(CuVector(scaling_info.l_org),
-            CuVector(scaling_info.u_org),
-            CuVector(scaling_info.row_norm),
-            CuVector(scaling_info.col_norm),
-            scaling_info.b_scale,
-            scaling_info.c_scale,
-            scaling_info.norm_b,
-            scaling_info.norm_c,
-            scaling_info.norm_b_org,
-            scaling_info.norm_c_org)
-        CUDA.synchronize()
-        if params.verbose
-            println(@sprintf("COPY TO GPU time: %.2f seconds", time() - t_start))
-        end
-    else
-        t_start = time()
-        if params.verbose
-            println("SCALING LP ...")
-        end
-        scaling_info = scaling!(standard_lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
-        if params.verbose
-            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
-        end
-    end
-
-    setup_time = time() - setup_start
-    if params.use_gpu
-        results = solve(standard_lp_gpu, scaling_info_gpu, params)
-    else
-        results = solve(standard_lp, scaling_info, params)
-    end
-    if params.verbose
-        println(@sprintf("Total time: %.2fs", read_time + setup_time + results.time),
-            @sprintf("  read time = %.2fs", read_time),
-            @sprintf("  setup time = %.2fs", setup_time),
-            @sprintf("  solve time = %.2fs", results.time))
-    end
-
-    return results
+    return standard_lp
 end
 
 """
-    run_lp(A, AL, AU, c, l, u, obj_constant, params)
+    build_from_Abc(A, c, AL, AU, l, u, obj_constant=0.0)
 
-Solve a linear program in standard form using the HPR-LP algorithm.
+Build an LP model from matrix form.
 
 # Arguments
 - `A::SparseMatrixCSC`: Constraint matrix (m × n)
+- `c::Vector{Float64}`: Objective coefficients (length n)
 - `AL::Vector{Float64}`: Lower bounds for constraints Ax (length m)
 - `AU::Vector{Float64}`: Upper bounds for constraints Ax (length m)
-- `c::Vector{Float64}`: Objective coefficients (length n)
 - `l::Vector{Float64}`: Lower bounds for variables x (length n)
 - `u::Vector{Float64}`: Upper bounds for variables x (length n)
-- `obj_constant::Float64`: Constant term in objective function
-- `params::HPRLP_parameters`: Solver parameters
+- `obj_constant::Float64`: Constant term in objective function (default: 0.0)
 
 # Returns
-- `HPRLP_results`: Solution results including objective value, solution vector, and convergence info
+- `LP_info_cpu`: LP model ready to be solved
 
 # Example
 ```julia
 using SparseArrays, HPRLP
 
-# min -3x - 5y
-# s.t. x + 2y ≤ 10
-#      3x + y ≤ 12
-#      x, y ≥ 0
-
 A = sparse([1.0 2.0; 3.0 1.0])
+c = [-3.0, -5.0]
 AL = [-Inf, -Inf]
 AU = [10.0, 12.0]
-c = [-3.0, -5.0]
 l = [0.0, 0.0]
 u = [Inf, Inf]
 
+model = build_from_Abc(A, c, AL, AU, l, u)
 params = HPRLP_parameters()
-params.verbose = false
-
-results = run_lp(A, AL, AU, c, l, u, 0.0, params)
-println("Optimal value: ", results.primal_obj)
-println("Solution: ", results.x)
+result = solve(model, params)
 ```
+
+See also: [`build_from_mps`](@ref), [`solve`](@ref)
 """
-function run_lp(A::SparseMatrixCSC,
+function build_from_Abc(A::SparseMatrixCSC,
+    c::Vector{Float64},
     AL::Vector{Float64},
     AU::Vector{Float64},
-    c::Vector{Float64},
     l::Vector{Float64},
     u::Vector{Float64},
-    obj_constant::Float64,
-    params::HPRLP_parameters)
+    obj_constant::Float64=0.0)
     
-    # Validate GPU parameters before proceeding
-    validate_gpu_parameters!(params)
+    # Create copies to avoid modifying the input
+    A_copy = copy(A)
+    c_copy = copy(c)
+    AL_copy = copy(AL)
+    AU_copy = copy(AU)
+    l_copy = copy(l)
+    u_copy = copy(u)
     
-    if params.warm_up
-        if params.verbose
-            println("warm up starts: ---------------------------------------------------------------------------------------------------------- ")
-        end
-        t_start_all = time()
-        max_iter = params.max_iter
-        params.max_iter = 200
-        results = run_Abc(A, c, AL, AU, l, u, obj_constant, params)
-        params.max_iter = max_iter
-        all_time = time() - t_start_all
-        if params.verbose
-            println("warm up time: ", all_time)
-            println("warm up ends ----------------------------------------------------------------------------------------------------------")
-        end
-    end
-    if params.verbose
-        println("main run starts: ----------------------------------------------------------------------------------------------------------")
-    end
-    results = run_Abc(A, c, AL, AU, l, u, obj_constant, params)
-    if params.verbose
-        println("main run ends----------------------------------------------------------------------------------------------------------")
-    end
-    return results
+    # Build the LP model
+    standard_lp = LP_info_cpu(A_copy, transpose(A_copy), c_copy, AL_copy, AU_copy, l_copy, u_copy, obj_constant)
+    
+    return standard_lp
 end
 
-# the function to run the HPR-LP algorithm on a single LP problem with A, b, c, l, u, m1, obj_constant
-function run_Abc(A::SparseMatrixCSC,
-    c::Vector{Float64},
-    AL::Vector{Float64},
-    AU::Vector{Float64},
-    l::Vector{Float64},
-    u::Vector{Float64},
-    obj_constant::Float64,
-    params::HPRLP_parameters)
-    A = copy(A)
-    c = copy(c)
-    AL = copy(AL)
-    AU = copy(AU)
-    l = copy(l)
-    u = copy(u)
-    setup_start = time()
-    standard_lp = LP_info_cpu(A, transpose(A), c, AL, AU, l, u, obj_constant)
-    if params.use_gpu
-        CUDA.device!(params.device_number)
-        t_start = time()
-        if params.verbose
-            println("SCALING LP ...")
-        end
-        scaling_info = scaling!(standard_lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
-        if params.verbose
-            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
-        end
+# Internal helper function used by run_dataset
+function run_file_internal(FILE_NAME::String, params::HPRLP_parameters)
+    # Build the model from MPS file
+    model = build_from_mps(FILE_NAME, verbose=params.verbose)
+    
+    # Solve the model (scaling is done inside solve)
+    results = solve(model, params)
 
-        CUDA.synchronize()
-        t_start = time()
-        if params.verbose
-            println("COPY TO GPU ...")
-        end
-        standard_lp_gpu = LP_info_gpu(CuSparseMatrixCSR(standard_lp.A),
-            CuSparseMatrixCSR(standard_lp.A'),
-            CuVector(standard_lp.c),
-            CuVector(standard_lp.AL),
-            CuVector(standard_lp.AU),
-            CuVector(standard_lp.l),
-            CuVector(standard_lp.u),
-            standard_lp.obj_constant,
-        )
-        scaling_info_gpu = Scaling_info_gpu(CuVector(scaling_info.l_org),
-            CuVector(scaling_info.u_org),
-            CuVector(scaling_info.row_norm),
-            CuVector(scaling_info.col_norm),
-            scaling_info.b_scale,
-            scaling_info.c_scale,
-            scaling_info.norm_b,
-            scaling_info.norm_c,
-            scaling_info.norm_b_org,
-            scaling_info.norm_c_org)
-        CUDA.synchronize()
-        if params.verbose
-            println(@sprintf("COPY TO GPU time: %.2f seconds", time() - t_start))
-        end
-    else
-        t_start = time()
-        if params.verbose
-            println("SCALING LP ...")
-        end
-        scaling_info = scaling!(standard_lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
-        if params.verbose
-            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
-        end
-    end
-    setup_time = time() - setup_start
-
-    if params.use_gpu
-        results = solve(standard_lp_gpu, scaling_info_gpu, params)
-    else
-        results = solve(standard_lp, scaling_info, params)
-    end
-    if params.verbose
-        println(@sprintf("Total time: %.2fs", setup_time + results.time),
-            @sprintf("  setup time = %.2fs", setup_time),
-            @sprintf("  solve time = %.2fs", results.time))
-    end
     return results
 end
 
@@ -528,7 +602,7 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                     t_start_all = time()
                     max_iter = params.max_iter
                     params.max_iter = 200
-                    results = run_file(FILE_NAME, params)
+                    results = run_file_internal(FILE_NAME, params)
                     params.max_iter = max_iter
                     all_time = time() - t_start_all
                     println("warm up time: ", all_time)
@@ -538,7 +612,7 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
 
                 println("main run starts: ----------------------------------------------------------------------------------------------------------")
                 t_start_all = time()
-                results = run_file(FILE_NAME, params)
+                results = run_file_internal(FILE_NAME, params)
                 all_time = time() - t_start_all
                 println("main run ends----------------------------------------------------------------------------------------------------------")
 
@@ -554,7 +628,7 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                 push!(timelist, min(results.time, params.time_limit))
                 push!(reslist, results.residuals)
                 push!(objlist, results.primal_obj)
-                push!(statuslist, results.output_type)
+                push!(statuslist, results.status)
                 push!(iter4list, results.iter_4)
                 push!(time4list, min(results.time_4, params.time_limit))
                 push!(iter6list, results.iter_6)
@@ -601,73 +675,6 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
 
     close(io)
 end
-
-"""
-    run_single(file_name, params)
-
-Solve a linear program from an MPS file using the HPR-LP algorithm.
-
-# Arguments
-- `file_name::String`: Path to the .mps file
-- `params::HPRLP_parameters`: Solver parameters
-
-# Returns
-- `HPRLP_results`: Solution results including objective value, solution vector, and convergence info
-
-# Example
-```julia
-using HPRLP
-
-params = HPRLP_parameters()
-params.stoptol = 1e-6
-params.verbose = true
-
-results = run_single("problem.mps", params)
-
-println("Status: ", results.status)
-println("Objective: ", results.primal_obj)
-println("Time: ", results.time, " seconds")
-println("Iterations: ", results.iter)
-```
-
-See also: [`run_lp`](@ref), [`HPRLP_parameters`](@ref), [`HPRLP_results`](@ref)
-"""
-function run_single(file_name::String, params::HPRLP_parameters)
-    if params.verbose
-        println("data path: ", file_name)
-    end
-
-    if occursin(".mps", file_name)
-        if params.warm_up
-            if params.verbose
-                println("warm up starts: ---------------------------------------------------------------------------------------------------------- ")
-            end
-            t_start_all = time()
-            max_iter = params.max_iter
-            params.max_iter = 200
-            results = run_file(file_name, params)
-            params.max_iter = max_iter
-            all_time = time() - t_start_all
-            if params.verbose
-                println("warm up time: ", all_time)
-                println("warm up ends ----------------------------------------------------------------------------------------------------------")
-            end
-        end
-
-        if params.verbose
-            println("main run starts: ----------------------------------------------------------------------------------------------------------")
-        end
-        results = run_file(file_name, params)
-        if params.verbose
-            println("main run ends----------------------------------------------------------------------------------------------------------")
-        end
-    else
-        error("The file is not in the correct format, please provide a .mps file")
-    end
-
-    return results
-end
-
 
 # Define the product of sets at module level (required for struct definition)
 MOI.Utilities.@product_of_sets(

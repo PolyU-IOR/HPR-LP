@@ -17,9 +17,10 @@ using LinearAlgebra
             params.warm_up = false
             params.verbose = false  # Silent mode for tests
             
-            result = HPRLP.run_single(mps_file, params)
+            model = HPRLP.build_from_mps(mps_file, verbose=false)
+            result = HPRLP.optimize(model, params)
             
-            @test result.output_type == "OPTIMAL"
+            @test result.status == "OPTIMAL"
             # Problem: min -3x1 - 5x2, s.t. x1+2x2<=10, 3x1+x2<=12, x1,x2>=0
             # Optimal: x1=2.8, x2=3.6, objective=-26.4
             @test isapprox(result.primal_obj, -26.4, atol=1e-2)
@@ -54,9 +55,10 @@ using LinearAlgebra
         params.warm_up = false
         params.verbose = false  # Silent mode for tests
         
-        result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+        result = HPRLP.optimize(model, params)
         
-        @test result.output_type == "OPTIMAL"
+        @test result.status == "OPTIMAL"
         @test isapprox(result.primal_obj, -26.4, atol=1e-2)
         @test result.x[1] >= -1e-6  # x1 >= 0
         @test result.x[2] >= -1e-6  # x2 >= 0
@@ -116,7 +118,8 @@ using LinearAlgebra
         params.warm_up = false
         params.verbose = false  # Silent mode for tests
         
-        result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+        result = HPRLP.optimize(model, params)
         
         # Test that result has all expected fields
         @test isdefined(result, :iter)
@@ -124,7 +127,7 @@ using LinearAlgebra
         @test isdefined(result, :primal_obj)
         @test isdefined(result, :residuals)
         @test isdefined(result, :gap)
-        @test isdefined(result, :output_type)
+        @test isdefined(result, :status)
         @test isdefined(result, :x)
         
         # Test types
@@ -132,7 +135,7 @@ using LinearAlgebra
         @test result.time isa Float64
         @test result.primal_obj isa Float64
         @test result.x isa Vector{Float64}
-        @test result.output_type isa String
+        @test result.status isa String
     end
     
     @testset "Bounded Variables LP" begin
@@ -156,9 +159,10 @@ using LinearAlgebra
         params.warm_up = false
         params.verbose = false  # Silent mode for tests
         
-        result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+        result = HPRLP.optimize(model, params)
         
-        @test result.output_type == "OPTIMAL"
+        @test result.status == "OPTIMAL"
         # Optimal solution should be x1=1, x2=0, objective=1
         @test isapprox(result.primal_obj, 1.0, atol=1e-3)
         @test isapprox(result.x[1], 1.0, atol=1e-3)
@@ -183,9 +187,10 @@ using LinearAlgebra
             params.verbose = false
             
             # Should fall back to CPU without crashing
-            result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
             
-            @test result.output_type == "OPTIMAL"
+            @test result.status == "OPTIMAL"
             @test isapprox(result.primal_obj, -26.4, atol=1e-2)
             # Verify that use_gpu was set to false after validation
             @test params.use_gpu == false
@@ -199,9 +204,10 @@ using LinearAlgebra
             params.verbose = false
             
             # Should fall back to CPU without crashing
-            result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
             
-            @test result.output_type == "OPTIMAL"
+            @test result.status == "OPTIMAL"
             @test isapprox(result.primal_obj, -26.4, atol=1e-2)
             # Verify that use_gpu was set to false after validation
             @test params.use_gpu == false
@@ -213,11 +219,215 @@ using LinearAlgebra
             params.warm_up = false
             params.verbose = false
             
-            result = HPRLP.run_lp(A, AL, AU, c, l, u, obj_constant, params)
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
             
-            @test result.output_type == "OPTIMAL"
+            @test result.status == "OPTIMAL"
             @test isapprox(result.primal_obj, -26.4, atol=1e-2)
             @test params.use_gpu == false
+        end
+    end
+    
+    @testset "Initial Point Functionality" begin
+        # Simple problem: min -3x1 - 5x2
+        # s.t. x1 + 2x2 <= 10  (equivalent to -x1 - 2x2 >= -10)
+        #      3x1 + x2 <= 12  (equivalent to -3x1 - x2 >= -12)
+        #      x1 >= 0, x2 >= 0
+        # Optimal: x1=2.8, x2=3.6, objective=-26.4
+        
+        A = sparse([-1.0 -2.0; -3.0 -1.0])
+        AL = Vector{Float64}([-10.0, -12.0])
+        AU = Vector{Float64}([Inf, Inf])
+        c = Vector{Float64}([-3.0, -5.0])
+        l = Vector{Float64}([0.0, 0.0])
+        u = Vector{Float64}([Inf, Inf])
+        obj_constant = 0.0
+        
+        @testset "No initial point (baseline)" begin
+            params = HPRLP.HPRLP_parameters()
+            params.time_limit = 60
+            params.stoptol = 1e-4
+            params.use_gpu = false
+            params.warm_up = false
+            params.verbose = false
+            
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
+            
+            @test result.status == "OPTIMAL"
+            @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+            @test isapprox(result.x[1], 2.8, atol=1e-2)
+            @test isapprox(result.x[2], 3.6, atol=1e-2)
+        end
+        
+        @testset "With optimal solution as initial point (both x and y)" begin
+            # First solve to get optimal solution
+            params_baseline = HPRLP.HPRLP_parameters()
+            params_baseline.time_limit = 60
+            params_baseline.stoptol = 1e-4
+            params_baseline.use_gpu = false
+            params_baseline.warm_up = false
+            params_baseline.verbose = false
+            
+            model_baseline = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result_baseline = HPRLP.optimize(model_baseline, params_baseline)
+            
+            # Use the result as initial point
+            params = HPRLP.HPRLP_parameters()
+            params.time_limit = 60
+            params.stoptol = 1e-4
+            params.use_gpu = false
+            params.warm_up = false
+            params.verbose = false
+            params.initial_x = result_baseline.x
+            params.initial_y = result_baseline.y
+            
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
+            
+            @test result.status == "OPTIMAL"
+            @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+            # Should converge faster with good initial point
+            @test result.iter == 0
+        end
+        
+        @testset "With only initial x" begin
+            # First solve to get optimal solution
+            params_baseline = HPRLP.HPRLP_parameters()
+            params_baseline.time_limit = 60
+            params_baseline.stoptol = 1e-4
+            params_baseline.use_gpu = false
+            params_baseline.warm_up = false
+            params_baseline.verbose = false
+            params_baseline.check_iter = 10
+            
+            model_baseline = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result_baseline = HPRLP.optimize(model_baseline, params_baseline)
+            
+            # Use only x as initial point
+            params = HPRLP.HPRLP_parameters()
+            params.time_limit = 60
+            params.stoptol = 1e-4
+            params.use_gpu = false
+            params.warm_up = false
+            params.verbose = false
+            params.check_iter = 10
+            params.initial_x = result_baseline.x
+            # params.initial_y remains nothing
+            
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
+            
+            @test result.status == "OPTIMAL"
+            @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+        end
+        
+        @testset "With only initial y" begin
+            # First solve to get optimal solution
+            params_baseline = HPRLP.HPRLP_parameters()
+            params_baseline.time_limit = 60
+            params_baseline.stoptol = 1e-4
+            params_baseline.use_gpu = false
+            params_baseline.warm_up = false
+            params_baseline.verbose = false
+            params_baseline.check_iter = 10
+
+            model_baseline = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result_baseline = HPRLP.optimize(model_baseline, params_baseline)
+            
+            # Use only y as initial point
+            params = HPRLP.HPRLP_parameters()
+            params.time_limit = 60
+            params.stoptol = 1e-4
+            params.use_gpu = false
+            params.warm_up = false
+            params.verbose = false
+            params.check_iter = 10
+            # params.initial_x remains nothing
+            params.initial_y = result_baseline.y
+            
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
+            
+            @test result.status == "OPTIMAL"
+            @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+        end
+        
+        @testset "With feasible but suboptimal initial point" begin
+            # Use a feasible but suboptimal starting point
+            params = HPRLP.HPRLP_parameters()
+            params.time_limit = 60
+            params.stoptol = 1e-4
+            params.use_gpu = false
+            params.warm_up = false
+            params.verbose = false
+            params.initial_x = [1.0, 1.0]  # Feasible but not optimal
+            
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
+            
+            @test result.status == "OPTIMAL"
+            @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+        end
+    end
+    
+    @testset "Auto-Save Functionality" begin
+        using HDF5
+        
+        # Create a simple LP problem
+        A = sparse([-1.0 -2.0; -3.0 -1.0])
+        AL = Vector{Float64}([-10.0, -12.0])
+        AU = Vector{Float64}([Inf, Inf])
+        c = Vector{Float64}([-3.0, -5.0])
+        l = Vector{Float64}([0.0, 0.0])
+        u = Vector{Float64}([Inf, Inf])
+        obj_constant = 0.0
+        
+        # Test file path
+        test_h5_file = joinpath(tempdir(), "test_autosave.h5")
+        
+        @testset "Auto-save enabled" begin
+            # Clean up any existing file
+            isfile(test_h5_file) && rm(test_h5_file)
+            
+            params = HPRLP.HPRLP_parameters()
+            params.time_limit = 60
+            params.stoptol = 1e-4
+            params.use_gpu = false
+            params.warm_up = false
+            params.verbose = false
+            params.auto_save = true
+            params.save_filename = test_h5_file
+            params.print_frequency = 10
+            
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
+            
+            @test result.status == "OPTIMAL"
+            @test isfile(test_h5_file)
+            
+            # Read and verify HDF5 file contents
+            h5open(test_h5_file, "r") do file
+                # Check current state
+                @test haskey(file, "current/iteration")
+                @test haskey(file, "current/x_org")
+                @test haskey(file, "current/y_org")
+                @test haskey(file, "current/sigma")
+                @test haskey(file, "current/primal_obj")
+                
+                # Check best state  
+                @test haskey(file, "best/iteration")
+                @test haskey(file, "best/x_org")
+                @test haskey(file, "best/y_org")
+                @test haskey(file, "best/sigma")
+                
+                # Verify data
+                x_best = read(file, "best/x_org")
+                @test length(x_best) == 2
+                @test x_best isa Vector{Float64}
+            end
+            
+            rm(test_h5_file)
         end
     end
 end

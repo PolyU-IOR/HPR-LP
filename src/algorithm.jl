@@ -107,6 +107,8 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     sc::Scaling_info_gpu,
     res::HPRLP_residuals,
     iter::Int,
+    params::HPRLP_parameters,
+    restart_info::HPRLP_restart,
 )
     ### obj
     scbc = sc.b_scale * sc.c_scale
@@ -127,6 +129,21 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
         res.err_Rp_org_bar = max(res.err_Rp_org_bar, sc.b_scale * CUDA.norm(ws.dx))
     end
     res.KKTx_and_gap_org_bar = max(res.err_Rp_org_bar, res.err_Rd_org_bar, res.rel_gap_bar)
+
+    # Save best values if auto_save is enabled
+    if params.auto_save
+        if iter == 0 || res.KKTx_and_gap_org_bar < max(ws.saved_state.save_err_Rp, ws.saved_state.save_err_Rd, ws.saved_state.save_rel_gap)
+            ws.saved_state.save_x .= ws.x_bar
+            ws.saved_state.save_y .= ws.y_bar
+            ws.saved_state.save_sigma = ws.sigma
+            ws.saved_state.save_iter = iter
+            ws.saved_state.save_err_Rp = res.err_Rp_org_bar
+            ws.saved_state.save_err_Rd = res.err_Rd_org_bar
+            ws.saved_state.save_primal_obj = res.primal_obj_bar
+            ws.saved_state.save_dual_obj = res.dual_obj_bar
+            ws.saved_state.save_rel_gap = res.rel_gap_bar
+        end
+    end
 end
 
 # the function to compute the residuals for the original LP problem
@@ -134,7 +151,9 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
     lp::LP_info_cpu,
     sc::Scaling_info_cpu,
     res::HPRLP_residuals,
-    iter::Int
+    iter::Int,
+    params::HPRLP_parameters,
+    restart_info::HPRLP_restart,
 )
     ### obj
     scbc = sc.b_scale * sc.c_scale
@@ -155,6 +174,21 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
     end
 
     res.KKTx_and_gap_org_bar = max(res.err_Rp_org_bar, res.err_Rd_org_bar, res.rel_gap_bar)
+
+    # Save best values if auto_save is enabled
+    if params.auto_save
+        if iter == 0 || res.KKTx_and_gap_org_bar < restart_info.best_gap
+            ws.saved_state.save_x .= ws.x_bar
+            ws.saved_state.save_y .= ws.y_bar
+            ws.saved_state.save_sigma = ws.sigma
+            ws.saved_state.save_iter = iter
+            ws.saved_state.save_err_Rp = res.err_Rp_org_bar
+            ws.saved_state.save_err_Rd = res.err_Rd_org_bar
+            ws.saved_state.save_primal_obj = res.primal_obj_bar
+            ws.saved_state.save_dual_obj = res.dual_obj_bar
+            ws.saved_state.save_rel_gap = res.rel_gap_bar
+        end
+    end
 end
 
 
@@ -339,7 +373,7 @@ function collect_results_gpu!(
     results.y .= Vector(sc.c_scale * (ws.y_bar ./ sc.row_norm))
     results.z .= Vector(sc.c_scale * (ws.z_bar .* sc.col_norm))
 
-    results.output_type = status
+    results.status = status
     # Set tolerance results, using final values if threshold not reached
     results.time_4 = tolerance_times[1] == 0.0 ? results.time : tolerance_times[1]
     results.iter_4 = tolerance_iters[1] == 0 ? iter : tolerance_iters[1]
@@ -375,7 +409,7 @@ function collect_results_cpu!(
     results.y .= sc.c_scale * (ws.y_bar ./ sc.row_norm)
     results.z .= sc.c_scale * (ws.z_bar .* sc.col_norm)
 
-    results.output_type = status
+    results.status = status
     # Set tolerance results, using final values if threshold not reached
     results.time_4 = tolerance_times[1] == 0.0 ? results.time : tolerance_times[1]
     results.iter_4 = tolerance_iters[1] == 0 ? iter : tolerance_iters[1]
@@ -434,7 +468,7 @@ function prepare_spmv!(A::CuSparseMatrixCSR{Float64,Int32}, AT::CuSparseMatrixCS
 end
 
 # the function to allocate the workspace for the HPR-LP algorithm
-function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu)
+function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu, params::HPRLP_parameters)
     ws = HPRLP_workspace_gpu()
     m, n = size(lp.A)
     ws.m = m
@@ -470,10 +504,59 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu)
     else
         ws.sigma = 1.0
     end
+
+    # Initialize with user-provided initial x if available
+    if params.initial_x !== nothing
+        # Copy initial_x to GPU first
+        ws.x .= CuArray(params.initial_x)
+
+        # Scale x on GPU: inverse of x_result = b_scale * (x_bar / col_norm)
+        # So x_bar = x_input * col_norm / b_scale
+        ws.x .= ws.x .* scaling_info.col_norm ./ scaling_info.b_scale
+        ws.x_bar .= ws.x
+        ws.last_x .= ws.x
+    end
+
+    # Initialize with user-provided initial y if available
+    if params.initial_y !== nothing
+        # Copy initial_y to GPU first
+        ws.y .= CuArray(params.initial_y)
+
+        # Scale y on GPU: inverse of y_result = c_scale * (y_bar / row_norm)
+        # So y_bar = y_input * row_norm / c_scale
+        ws.y .= ws.y .* scaling_info.row_norm ./ scaling_info.c_scale
+        ws.y_bar .= ws.y
+        ws.last_y .= ws.y
+
+        # Compute y_obj based on y_bar
+        compute_y_obj_gpu!(ws.y_obj, ws.y_bar, ws.AL, ws.AU, m)
+
+        # Compute z_bar = c - AT * y_bar
+        CUDA.CUSPARSE.cusparseSpMV(ws.spmv_AT.handle, ws.spmv_AT.operator, ws.spmv_AT.alpha,
+            ws.spmv_AT.desc_AT, ws.spmv_AT.desc_y_bar, ws.spmv_AT.beta, ws.spmv_AT.desc_ATy,
+            ws.spmv_AT.compute_type, ws.spmv_AT.alg, ws.spmv_AT.buf)
+        ws.z_bar .= ws.c .- ws.ATy
+    end
+
+    # Initialize saved_state for auto_save feature
+    ws.saved_state = HPRLP_saved_state_gpu()
+    ws.saved_state.save_x = CUDA.zeros(Float64, n)
+    ws.saved_state.save_y = CUDA.zeros(Float64, m)
+    ws.saved_state.save_sigma = ws.sigma
+    ws.saved_state.save_iter = 0
+    ws.saved_state.save_err_Rp = Inf
+    ws.saved_state.save_err_Rd = Inf
+    ws.saved_state.save_primal_obj = 0.0
+    ws.saved_state.save_dual_obj = 0.0
+    ws.saved_state.save_rel_gap = Inf
+
+    # Initialize backup flag
+    ws.backup_created = false
+
     return ws
 end
 
-function allocate_workspace_cpu(lp::LP_info_cpu, scaling_info::Scaling_info_cpu)
+function allocate_workspace_cpu(lp::LP_info_cpu, scaling_info::Scaling_info_cpu, params::HPRLP_parameters)
     ws = HPRLP_workspace_cpu()
     m, n = size(lp.A)
     ws.m = m
@@ -507,7 +590,156 @@ function allocate_workspace_cpu(lp::LP_info_cpu, scaling_info::Scaling_info_cpu)
     else
         ws.sigma = 1.0
     end
+
+    # Initialize with user-provided initial x if available
+    if params.initial_x !== nothing
+        # Scale x: inverse of x_result = b_scale * (x_bar / col_norm)
+        # So x_bar = x_input * col_norm / b_scale
+        scaled_x = params.initial_x .* scaling_info.col_norm ./ scaling_info.b_scale
+        ws.x .= scaled_x
+        ws.x_bar .= scaled_x
+        ws.last_x .= scaled_x
+    end
+
+    # Initialize with user-provided initial y if available
+    if params.initial_y !== nothing
+        # Scale y: inverse of y_result = c_scale * (y_bar / row_norm)
+        # So y_bar = y_input * row_norm / c_scale
+        scaled_y = params.initial_y .* scaling_info.row_norm ./ scaling_info.c_scale
+        ws.y .= scaled_y
+        ws.y_bar .= scaled_y
+        ws.last_y .= scaled_y
+
+        # Compute y_obj based on y_bar
+        for i in 1:m
+            y_bar_val = ws.y_bar[i]
+            if y_bar_val > 0.0
+                ws.y_obj[i] = ws.AL[i]
+            elseif y_bar_val < 0.0
+                ws.y_obj[i] = ws.AU[i]
+                # else keep y_obj[i] as 0
+            end
+        end
+
+        # Compute z_bar = c - AT * y_bar
+        mul!(ws.ATy, ws.AT, ws.y_bar)
+        ws.z_bar .= ws.c .- ws.ATy
+    end
+
+    # Initialize saved_state for auto_save feature
+    ws.saved_state = HPRLP_saved_state_cpu()
+    ws.saved_state.save_x = Vector(zeros(n))
+    ws.saved_state.save_y = Vector(zeros(m))
+    ws.saved_state.save_sigma = ws.sigma
+    ws.saved_state.save_iter = 0
+    ws.saved_state.save_err_Rp = Inf
+    ws.saved_state.save_err_Rd = Inf
+    ws.saved_state.save_primal_obj = 0.0
+    ws.saved_state.save_dual_obj = 0.0
+    ws.saved_state.save_rel_gap = Inf
+
     return ws
+end
+
+# the function to save current state to HDF5 file
+# This function is called whenever the log is printed (if auto_save is enabled)
+# It saves:
+#   - Current solution (x_bar, y_bar) - scaled to original problem
+#   - Best solution so far (save_x, save_y) - scaled to original problem
+#   - Current and best sigma values
+#   - Current and best residuals, objectives, and iteration numbers
+#   - Current iteration number and elapsed time
+#   - All solver parameters including initial solutions
+function save_state_to_hdf5(
+    filename::String,
+    ws::Union{HPRLP_workspace_gpu,HPRLP_workspace_cpu},
+    sc::Union{Scaling_info_gpu,Scaling_info_cpu},
+    residuals::HPRLP_residuals,
+    params::HPRLP_parameters,
+    iter::Int,
+    t_start_alg::Float64,
+)
+    # Convert GPU arrays to CPU if needed
+    if ws isa HPRLP_workspace_gpu
+        x_bar = Vector(ws.x_bar)
+        y_bar = Vector(ws.y_bar)
+        save_x = Vector(ws.saved_state.save_x)
+        save_y = Vector(ws.saved_state.save_y)
+        col_norm = Vector(sc.col_norm)
+        row_norm = Vector(sc.row_norm)
+    else
+        x_bar = ws.x_bar
+        y_bar = ws.y_bar
+        save_x = ws.saved_state.save_x
+        save_y = ws.saved_state.save_y
+        col_norm = sc.col_norm
+        row_norm = sc.row_norm
+    end
+
+    # Scale the variables (same as in collect_results)
+    x_bar_scaled = sc.b_scale * (x_bar ./ col_norm)
+    y_bar_scaled = sc.c_scale * (y_bar ./ row_norm)
+    save_x_scaled = sc.b_scale * (save_x ./ col_norm)
+    save_y_scaled = sc.c_scale * (save_y ./ row_norm)
+
+    # Create or open HDF5 file
+    if isfile(filename)
+        rm(filename, force=true)
+    end
+    h5open(filename, "w") do file
+        # Save current iteration info
+        file["current/iteration"] = iter
+        file["current/time_elapsed"] = time() - t_start_alg
+        file["current/timestamp"] = string(Dates.now())
+
+        # Save current solution (scaled)
+        file["current/x_org"] = x_bar_scaled
+        file["current/y_org"] = y_bar_scaled
+        file["current/sigma"] = ws.sigma
+
+        # Save current residuals
+        file["current/err_Rp"] = residuals.err_Rp_org_bar
+        file["current/err_Rd"] = residuals.err_Rd_org_bar
+        file["current/primal_obj"] = residuals.primal_obj_bar
+        file["current/dual_obj"] = residuals.dual_obj_bar
+        file["current/rel_gap"] = residuals.rel_gap_bar
+
+        # Save best solution so far (scaled)
+        file["best/x_org"] = save_x_scaled
+        file["best/y_org"] = save_y_scaled
+        file["best/sigma"] = ws.saved_state.save_sigma
+        file["best/iteration"] = ws.saved_state.save_iter
+
+        # Save best residuals
+        file["best/err_Rp"] = ws.saved_state.save_err_Rp
+        file["best/err_Rd"] = ws.saved_state.save_err_Rd
+        file["best/primal_obj"] = ws.saved_state.save_primal_obj
+        file["best/dual_obj"] = ws.saved_state.save_dual_obj
+        file["best/rel_gap"] = ws.saved_state.save_rel_gap
+
+        # Save parameters
+        file["parameters/stoptol"] = params.stoptol
+        file["parameters/max_iter"] = params.max_iter
+        file["parameters/time_limit"] = params.time_limit
+        file["parameters/check_iter"] = params.check_iter
+        file["parameters/use_Ruiz_scaling"] = params.use_Ruiz_scaling
+        file["parameters/use_Pock_Chambolle_scaling"] = params.use_Pock_Chambolle_scaling
+        file["parameters/use_bc_scaling"] = params.use_bc_scaling
+        file["parameters/use_gpu"] = params.use_gpu
+        file["parameters/device_number"] = params.device_number
+        file["parameters/warm_up"] = params.warm_up
+        file["parameters/print_frequency"] = params.print_frequency
+        file["parameters/verbose"] = params.verbose
+        file["parameters/auto_save"] = params.auto_save
+
+        # Save initial solutions if provided
+        if params.initial_x !== nothing
+            file["parameters/initial_x"] = params.initial_x
+        end
+        if params.initial_y !== nothing
+            file["parameters/initial_y"] = params.initial_y
+        end
+    end
 end
 
 # the function to initialize the restart information
@@ -530,6 +762,185 @@ end
 
 function print_step(iter::Int)
     return max(10^floor(log10(iter)) / 10, 10)
+end
+
+# Helper function to transfer model to GPU
+function setup_gpu_model(model::LP_info_cpu, params::HPRLP_parameters)
+    CUDA.device!(params.device_number)
+    t_start = time()
+    if params.verbose
+        println("COPY TO GPU ...")
+    end
+    
+    model_gpu = LP_info_gpu(
+        CuSparseMatrixCSR(model.A),
+        CuSparseMatrixCSR(model.AT),
+        CuVector(model.c),
+        CuVector(model.AL),
+        CuVector(model.AU),
+        CuVector(model.l),
+        CuVector(model.u),
+        model.obj_constant,
+    )
+    CUDA.synchronize()
+    
+    if params.verbose
+        println(@sprintf("COPY TO GPU time: %.2f seconds", time() - t_start))
+    end
+    
+    return model_gpu
+end
+
+# Helper function to apply scaling (CPU or GPU)
+function setup_scaling(lp::Union{LP_info_cpu, LP_info_gpu}, params::HPRLP_parameters)
+    t_start = time()
+    
+    if params.use_gpu
+        if params.verbose
+            println("SCALING LP ON GPU ...")
+        end
+        scaling_info = scaling_gpu!(lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
+        CUDA.synchronize()
+        if params.verbose
+            println(@sprintf("SCALING LP ON GPU time: %.2f seconds", time() - t_start))
+        end
+    else
+        if params.verbose
+            println("SCALING LP ...")
+        end
+        scaling_info = scaling!(lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
+        if params.verbose
+            println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
+        end
+    end
+    
+    return scaling_info
+end
+
+# Helper function to print solver parameters
+function print_solver_parameters(params::HPRLP_parameters, m::Int, n::Int)
+    println("="^80)
+    println("SOLVER PARAMETERS:")
+    println("  Problem size: m = ", m, ", n = ", n)
+    println("  Device: ", params.use_gpu ? "GPU (device $(params.device_number))" : "CPU")
+    println("  Stop tolerance: ", params.stoptol)
+    println("  Max iterations: ", params.max_iter)
+    println("  Time limit: ", params.time_limit, " seconds")
+    println("  Check interval: ", params.check_iter)
+    println("  Print frequency: ", params.print_frequency == -1 ? "Adaptive" : params.print_frequency)
+    println("  Scaling options:")
+    println("    Ruiz scaling: ", params.use_Ruiz_scaling ? "Enabled" : "Disabled")
+    println("    Pock-Chambolle scaling: ", params.use_Pock_Chambolle_scaling ? "Enabled" : "Disabled")
+    println("    b/c scaling: ", params.use_bc_scaling ? "Enabled" : "Disabled")
+    
+    if params.warm_up
+        println("  Warm-up: Enabled (avoids JIT compilation overhead)")
+    else
+        println("  Warm-up: Disabled")
+        println("    ⚠ WARNING: First run of each function may be slower due to JIT compilation.")
+        println("    ⚠ Consider enabling warm_up for more accurate timing measurements.")
+    end
+    
+    if params.initial_x !== nothing
+        println("  Initial x: Provided (length ", length(params.initial_x), ")")
+    end
+    if params.initial_y !== nothing
+        println("  Initial y: Provided (length ", length(params.initial_y), ")")
+    end
+    
+    if params.auto_save
+        # Calculate estimated memory for auto_save
+        memory_bytes = (n + m) * 16  # 8 bytes per Float64
+        memory_mb = memory_bytes / (1024 * 1024)
+        memory_gb = memory_bytes / (1024 * 1024 * 1024)
+        
+        println("  Auto-save: ENABLED")
+        println("    ⚠ WARNING: Auto-save will write to disk at each print iteration.")
+        println("    ⚠ This may consume significant I/O bandwidth and slightly reduce speed.")
+        if memory_gb >= 1.0
+            println(@sprintf("    ⚠ Estimated memory for saved state: %.2f GB", memory_gb))
+        elseif memory_mb >= 1.0
+            println(@sprintf("    ⚠ Estimated memory for saved state: %.2f MB", memory_mb))
+        elseif memory_bytes >= 1024.0
+            println(@sprintf("    ⚠ Estimated memory for saved state: %.2f KB", memory_bytes / 1024))
+        else
+            println(@sprintf("    ⚠ Estimated memory for saved state: %.2f bytes", memory_bytes))
+        end
+        println("    Save file: ", params.save_filename)
+    else
+        println("  Auto-save: Disabled")
+    end
+    println("="^80)
+end
+
+# Helper function to select GPU or CPU function implementations
+function setup_solver_functions(use_gpu::Bool)
+    if use_gpu
+        return (
+            compute_residuals_gpu!,
+            update_sigma_gpu!,
+            collect_results_gpu!,
+            update_x_z_gpu!,
+            update_y_gpu!,
+            compute_weighted_norm_gpu!
+        )
+    else
+        return (
+            compute_residuals_cpu!,
+            update_sigma_cpu!,
+            collect_results_cpu!,
+            update_x_z_cpu!,
+            update_y_cpu!,
+            compute_weighted_norm_cpu!
+        )
+    end
+end
+
+# Helper function to determine if log should be printed
+function should_print_log(iter::Int, max_iter::Int, print_frequency::Int, t_start_alg::Float64, time_limit::Float64)
+    if print_frequency == -1
+        return (rem(iter, print_step(iter)) == 0) || (iter == max_iter) || (time() - t_start_alg > time_limit)
+    elseif print_frequency > 0
+        return (rem(iter, print_frequency) == 0) || (iter == max_iter) || (time() - t_start_alg > time_limit)
+    else
+        error("Invalid print_frequency: ", print_frequency, ". It should be a positive integer or -1 for automatic printing.")
+    end
+end
+
+# Helper function to print iteration log
+function print_iteration_log(iter::Int, residuals::HPRLP_residuals, sigma::Float64, t_start_alg::Float64)
+    println(@sprintf("%5.0f    %3.2e    %3.2e    %+7.6e    %+7.6e    %3.2e    %3.2e    %6.2f",
+        iter,
+        residuals.err_Rp_org_bar,
+        residuals.err_Rd_org_bar,
+        residuals.primal_obj_bar,
+        residuals.dual_obj_bar,
+        residuals.rel_gap_bar,
+        sigma,
+        time() - t_start_alg))
+end
+
+# Helper function to check and record tolerance thresholds
+function check_and_record_tolerance!(
+    residuals::HPRLP_residuals,
+    iter::Int,
+    t_start_alg::Float64,
+    tolerance_levels::Vector{Float64},
+    tolerance_times::Vector{Float64},
+    tolerance_iters::Vector{Int},
+    tolerance_reached::BitVector,
+    verbose::Bool
+)
+    for i in eachindex(tolerance_levels)
+        if !tolerance_reached[i] && residuals.KKTx_and_gap_org_bar < tolerance_levels[i]
+            tolerance_times[i] = time() - t_start_alg
+            tolerance_iters[i] = iter
+            tolerance_reached[i] = true
+            if verbose
+                println("KKT < ", tolerance_levels[i], " at iter = ", iter)
+            end
+        end
+    end
 end
 
 function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
@@ -557,21 +968,161 @@ function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
 end
 
 # The main function for the HPR-LP algorithm
-function solve(lp::Union{LP_info_gpu,LP_info_cpu},
-    scaling_info::Union{Scaling_info_gpu,Scaling_info_cpu},
-    params::HPRLP_parameters)
+"""
+    optimize(model::LP_info_cpu, params::HPRLP_parameters)
 
+Optimize a linear program using the HPR-LP algorithm.
+
+This function handles GPU transfer, scaling, and optional warmup internally based on the parameters.
+
+# Arguments
+- `model::LP_info_cpu`: LP model built from `build_from_mps` or `build_from_Abc`
+- `params::HPRLP_parameters`: Solver parameters
+
+# Returns
+- `HPRLP_results`: Solution results including objective value, solution vector, and convergence info
+
+# Example
+```julia
+using HPRLP
+
+model = build_from_mps("problem.mps")
+params = HPRLP_parameters()
+params.stoptol = 1e-6
+params.use_gpu = true
+params.warm_up = true
+
+result = optimize(model, params)
+println("Status: ", result.status)
+println("Objective: ", result.primal_obj)
+```
+
+See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
+"""
+function optimize(model::LP_info_cpu, params::HPRLP_parameters)
+    # Handle warmup if requested
+    if params.warm_up
+        if params.verbose
+            println("="^80)
+            println("WARM UP PHASE")
+            println("  ℹ Running warmup to avoid JIT compilation overhead in main solve")
+            println("="^80)
+        end
+        t_start_warmup = time()
+        
+        # Save original max_iter and verbose
+        original_max_iter = params.max_iter
+        original_verbose = params.verbose
+        params.max_iter = 200
+        params.verbose = false
+        
+        # Create a copy of the model for warmup
+        warmup_model = LP_info_cpu(
+            copy(model.A), copy(model.AT), copy(model.c), 
+            copy(model.AL), copy(model.AU), copy(model.l), copy(model.u), 
+            model.obj_constant
+        )
+        
+        # Run warmup solve
+        solve(warmup_model, params)
+        
+        # Restore original parameters
+        params.max_iter = original_max_iter
+        params.verbose = original_verbose
+        
+        warmup_time = time() - t_start_warmup
+        if params.verbose
+            println(@sprintf("Warmup time: %.2f seconds", warmup_time))
+            println("="^80)
+            println()
+        end
+    end
+    
+    # Main solve
+    if params.verbose
+        println("="^80)
+        println("MAIN SOLVE")
+        println("="^80)
+    end
+    
+    setup_start = time()
+    results = solve(model, params)
+    setup_time = time() - setup_start - results.time
+    
+    if params.verbose
+        println(@sprintf("Total time: %.2fs", setup_time + results.time),
+            @sprintf("  setup time = %.2fs", setup_time),
+            @sprintf("  solve time = %.2fs", results.time))
+        println("="^80)
+    end
+    
+    return results
+end
+
+"""
+    solve(model::LP_info_cpu, params::HPRLP_parameters)
+
+Solve a CPU-based LP model (with GPU transfer and scaling applied internally).
+
+This is the core solver function that:
+1. Transfers to GPU if needed (based on params.use_gpu)
+2. Applies scaling
+3. Runs the HPR-LP algorithm
+
+# Arguments
+- `model::LP_info_cpu`: LP model on CPU
+- `params::HPRLP_parameters`: Solver parameters
+
+# Returns
+- `HPRLP_results`: Solution results
+
+# Example
+```julia
+using HPRLP
+
+model = build_from_Abc(A, c, AL, AU, l, u)
+params = HPRLP_parameters()
+params.use_gpu = true
+result = solve(model, params)
+```
+
+See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`optimize`](@ref)
+"""
+function solve(model::LP_info_cpu, params::HPRLP_parameters)
+    # Validate GPU parameters before attempting GPU operations
+    if params.use_gpu
+        validate_gpu_parameters!(params)
+    end
+    
+    # Setup: GPU transfer and scaling
+    if params.use_gpu
+        lp = setup_gpu_model(model, params)
+        scaling_info = setup_scaling(lp, params)
+    else
+        scaling_info = setup_scaling(model, params)
+        lp = model
+    end
+    
+    # Main optimization algorithm
     if params.verbose
         println("HPR-LP version v0.1.3")
     end
     t_start_alg = time()
+    
+    # Get problem dimensions
+    m, n = size(lp.A)
 
-    ### Initialization ###
+    # Print solver parameters
+    if params.verbose
+        print_solver_parameters(params, m, n)
+    end
+
+    # Initialization
     residuals = HPRLP_residuals()
-    ws = params.use_gpu ? allocate_workspace_gpu(lp, scaling_info) : allocate_workspace_cpu(lp, scaling_info)
+    ws = params.use_gpu ? allocate_workspace_gpu(lp, scaling_info, params) : allocate_workspace_cpu(lp, scaling_info, params)
     restart_info = initialize_restart(ws.sigma)
 
-    ### power iteration to estimate lambda_max ###
+    # Power iteration to estimate lambda_max
     power_time = compute_maximum_eigenvalue!(lp, ws, params)
 
     if params.verbose
@@ -584,73 +1135,49 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
     tolerance_iters = zeros(Int, length(tolerance_levels))
     tolerance_reached = falses(length(tolerance_levels))
 
-    if params.use_gpu
-        compute_residuals! = compute_residuals_gpu!
-        update_sigma! = update_sigma_gpu!
-        collect_results! = collect_results_gpu!
-        update_x_z! = update_x_z_gpu!
-        update_y! = update_y_gpu!
-        compute_weighted_norm! = compute_weighted_norm_gpu!
-    else
-        compute_residuals! = compute_residuals_cpu!
-        update_sigma! = update_sigma_cpu!
-        collect_results! = collect_results_cpu!
-        update_x_z! = update_x_z_cpu!
-        update_y! = update_y_cpu!
-        compute_weighted_norm! = compute_weighted_norm_cpu!
-    end
+    # Select GPU or CPU function implementations
+    compute_residuals!, update_sigma!, collect_results!, update_x_z!, update_y!, compute_weighted_norm! = 
+        setup_solver_functions(params.use_gpu)
 
+    # Main iteration loop
     for iter = 0:params.max_iter
-        ### whether to print the log ###
-        if params.print_frequency == -1
-            print_yes = ((rem(iter, print_step(iter)) == 0) || (iter == params.max_iter) ||
-                         (time() - t_start_alg > params.time_limit))
-        elseif params.print_frequency > 0
-            print_yes = ((rem(iter, params.print_frequency) == 0) || (iter == params.max_iter) ||
-                         (time() - t_start_alg > params.time_limit))
-        else
-            error("Invalid print_frequency: ", params.print_frequency, ". It should be a positive integer or -1 for automatic printing.")
-        end
+        # Determine if log should be printed
+        print_yes = should_print_log(iter, params.max_iter, params.print_frequency, t_start_alg, params.time_limit)
 
-        ### compute residuals ###
+        # Compute residuals
         if rem(iter, params.check_iter) == 0 || print_yes
-            compute_residuals!(ws, lp, scaling_info, residuals, iter)
+            compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info)
         end
 
-        ### check break ###
+        # Check termination conditions
         status = check_break(residuals, iter, t_start_alg, params)
 
-        ### check restart ###
+        # Check restart conditions
         check_restart(restart_info, iter, params.check_iter, ws.sigma)
 
-        ### print the log ###
+        # Print iteration log
         if print_yes || (status != "CONTINUE")
             if params.verbose
-                println(@sprintf("%5.0f    %3.2e    %3.2e    %+7.6e    %+7.6e    %3.2e    %3.2e    %6.2f",
-                    iter,
-                    residuals.err_Rp_org_bar,
-                    residuals.err_Rd_org_bar,
-                    residuals.primal_obj_bar,
-                    residuals.dual_obj_bar,
-                    residuals.rel_gap_bar,
-                    ws.sigma,
-                    time() - t_start_alg))
+                print_iteration_log(iter, residuals, ws.sigma, t_start_alg)
             end
-        end
 
-        ### collect results and return ###
-        # Check tolerance thresholds
-        for i in eachindex(tolerance_levels)
-            if !tolerance_reached[i] && residuals.KKTx_and_gap_org_bar < tolerance_levels[i]
-                tolerance_times[i] = time() - t_start_alg
-                tolerance_iters[i] = iter
-                tolerance_reached[i] = true
-                if params.verbose
-                    println("KKT < ", tolerance_levels[i], " at iter = ", iter)
+            # Save to HDF5 if auto_save is enabled
+            if params.auto_save
+                try
+                    save_state_to_hdf5(params.save_filename, ws, scaling_info, residuals, params, iter, t_start_alg)
+                catch e
+                    if params.verbose
+                        println("Warning: Failed to save to HDF5 file: ", e)
+                    end
                 end
             end
         end
 
+        # Check and record tolerance thresholds
+        check_and_record_tolerance!(residuals, iter, t_start_alg, tolerance_levels, 
+            tolerance_times, tolerance_iters, tolerance_reached, params.verbose)
+
+        # Collect results and return if terminated
         if status != "CONTINUE"
             if params.verbose
                 println("Termination reason: ", status, ", accuracy = ", residuals.KKTx_and_gap_org_bar)
@@ -659,13 +1186,13 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
             return results
         end
 
-        ### update sigma ###
+        # Update sigma
         update_sigma!(restart_info, ws, residuals)
 
-        ### restart if needed ###
+        # Restart if needed
         do_restart!(restart_info, ws)
 
-        ## whether to compute bar points for residuals ##
+        # Determine whether to compute bar points for residuals
         ws.to_check = (rem(iter + 1, params.check_iter) == 0) || (restart_info.restart_flag > 0)
         if params.print_frequency == -1
             ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter + 1)) == 0)
@@ -673,14 +1200,14 @@ function solve(lp::Union{LP_info_gpu,LP_info_cpu},
             ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
         end
 
-        ### update x, y,  and z ###
+        # Update x, y, and z
         fact1 = 1.0 / (restart_info.inner + 2.0)
         fact2 = 1.0 - fact1
         update_x_z!(ws, fact1, fact2)
         update_y!(ws, fact1, fact2)
-        restart_info.inner += 1 
+        restart_info.inner += 1
 
-        ### compute weighted norm ###
+        # Compute weighted norm
         if rem(iter + 1, params.check_iter) == 0
             restart_info.current_gap = compute_weighted_norm!(ws)
         end

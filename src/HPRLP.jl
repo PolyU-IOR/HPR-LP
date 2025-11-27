@@ -12,6 +12,8 @@ using Random
 using Statistics
 using Logging
 using JuMP
+using HDF5
+using Dates
 import MathOptInterface as MOI
 
 include("structs.jl")
@@ -24,6 +26,7 @@ include("MOI_wrapper.jl")
 export Optimizer
 
 # Export main functions and types for direct API usage
-export run_lp, run_single, HPRLP_parameters, HPRLP_results
+export HPRLP_parameters, HPRLP_results
+export build_from_mps, build_from_Abc, optimize
 
 end

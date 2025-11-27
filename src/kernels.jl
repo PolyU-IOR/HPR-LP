@@ -11,6 +11,31 @@ function axpby_gpu!(a::Float64, x::CuVector{Float64}, b::Float64, y::CuVector{Fl
     @cuda threads = 256 blocks = ceil(Int, n / 256) axpby_kernel!(a, x, b, y, z, n)
 end
 
+# kernel to compute y_obj from y_bar for initialization
+function compute_y_obj_kernel!(y_obj::CuDeviceVector{Float64},
+    y_bar::CuDeviceVector{Float64},
+    AL::CuDeviceVector{Float64},
+    AU::CuDeviceVector{Float64},
+    m::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= m
+        @inbounds begin
+            y_bar_val = y_bar[i]
+            if y_bar_val > 0.0
+                y_obj[i] = AL[i]
+            elseif y_bar_val < 0.0
+                y_obj[i] = AU[i]
+            # else keep y_obj[i] unchanged (already initialized to 0)
+            end
+        end
+    end
+    return
+end
+
+function compute_y_obj_gpu!(y_obj::CuVector{Float64}, y_bar::CuVector{Float64}, AL::CuVector{Float64}, AU::CuVector{Float64}, m::Int)
+    @cuda threads = 256 blocks = ceil(Int, m / 256) compute_y_obj_kernel!(y_obj, y_bar, AL, AU, m)
+end
+
 function combined_kernel_x_z_1!(dx::CuDeviceVector{Float64},
     x::CuDeviceVector{Float64},
     z_bar::CuDeviceVector{Float64},
@@ -338,4 +363,179 @@ function compute_err_Rp_cpu!(ws::HPRLP_workspace_cpu, sc::Scaling_info_cpu)
             Rp[i] *= row_norm[i]
         end
     end
+end
+
+# GPU kernels for scaling operations
+
+# Kernel to compute row-wise maximum of absolute values for CSR matrix
+function compute_row_max_abs_kernel!(rowPtr::CuDeviceVector{Int32}, 
+                                      nzVal::CuDeviceVector{Float64},
+                                      row_norm::CuDeviceVector{Float64},
+                                      m::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= m
+        @inbounds begin
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            max_val = 0.0
+            for k in start_idx:end_idx
+                val = abs(nzVal[k])
+                max_val = max(max_val, val)
+            end
+            row_norm[i] = max_val > 0.0 ? sqrt(max_val) : 1.0
+        end
+    end
+    return
+end
+
+# Kernel to compute column-wise maximum of absolute values for CSR matrix (operates on AT in CSR format)
+function compute_col_max_abs_kernel!(rowPtr::CuDeviceVector{Int32}, 
+                                      nzVal::CuDeviceVector{Float64},
+                                      col_norm::CuDeviceVector{Float64},
+                                      n::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= n
+        @inbounds begin
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            max_val = 0.0
+            for k in start_idx:end_idx
+                val = abs(nzVal[k])
+                max_val = max(max_val, val)
+            end
+            col_norm[i] = max_val > 0.0 ? sqrt(max_val) : 1.0
+        end
+    end
+    return
+end
+
+# Kernel to compute row-wise sum of absolute values for CSR matrix
+function compute_row_sum_abs_kernel!(rowPtr::CuDeviceVector{Int32}, 
+                                      nzVal::CuDeviceVector{Float64},
+                                      row_norm::CuDeviceVector{Float64},
+                                      m::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= m
+        @inbounds begin
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            sum_val = 0.0
+            for k in start_idx:end_idx
+                sum_val += abs(nzVal[k])
+            end
+            row_norm[i] = sum_val > 0.0 ? sqrt(sum_val) : 1.0
+        end
+    end
+    return
+end
+
+# Kernel to compute column-wise sum of absolute values for CSR matrix (operates on AT in CSR format)
+function compute_col_sum_abs_kernel!(rowPtr::CuDeviceVector{Int32}, 
+                                      nzVal::CuDeviceVector{Float64},
+                                      col_norm::CuDeviceVector{Float64},
+                                      n::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= n
+        @inbounds begin
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            sum_val = 0.0
+            for k in start_idx:end_idx
+                sum_val += abs(nzVal[k])
+            end
+            col_norm[i] = sum_val > 0.0 ? sqrt(sum_val) : 1.0
+        end
+    end
+    return
+end
+
+# Kernel to scale rows of CSR matrix by 1.0 / row_scale
+function scale_rows_csr_kernel!(rowPtr::CuDeviceVector{Int32}, 
+                                 nzVal::CuDeviceVector{Float64},
+                                 row_scale::CuDeviceVector{Float64},
+                                 m::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= m
+        @inbounds begin
+            scale = 1.0 / row_scale[i]
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            for k in start_idx:end_idx
+                nzVal[k] *= scale
+            end
+        end
+    end
+    return
+end
+
+# Kernel to scale columns of CSR matrix (this operates on AT stored in CSR, so scaling rows of AT = scaling columns of A)
+function scale_cols_via_AT_csr_kernel!(rowPtr::CuDeviceVector{Int32}, 
+                                        nzVal::CuDeviceVector{Float64},
+                                        col_scale::CuDeviceVector{Float64},
+                                        n::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= n
+        @inbounds begin
+            scale = 1.0 / col_scale[i]
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            for k in start_idx:end_idx
+                nzVal[k] *= scale
+            end
+        end
+    end
+    return
+end
+
+# Kernel to scale columns of CSR matrix by column indices
+function scale_csr_cols_kernel!(rowPtr::CuDeviceVector{Int32},
+                                 colVal::CuDeviceVector{Int32},
+                                 nzVal::CuDeviceVector{Float64},
+                                 col_scale::CuDeviceVector{Float64},
+                                 m::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= m
+        @inbounds begin
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            for k in start_idx:end_idx
+                col_idx = colVal[k]
+                nzVal[k] /= col_scale[col_idx]
+            end
+        end
+    end
+    return
+end
+
+# Kernel to scale a vector by another vector element-wise (v[i] /= scale[i])
+function scale_vector_div_kernel!(v::CuDeviceVector{Float64}, 
+                                   scale::CuDeviceVector{Float64},
+                                   n::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= n
+        @inbounds v[i] /= scale[i]
+    end
+    return
+end
+
+# Kernel to scale a vector by another vector element-wise (v[i] *= scale[i])
+function scale_vector_mul_kernel!(v::CuDeviceVector{Float64}, 
+                                   scale::CuDeviceVector{Float64},
+                                   n::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= n
+        @inbounds v[i] *= scale[i]
+    end
+    return
+end
+
+# Kernel to scale a vector by a scalar (v[i] /= scalar)
+function scale_vector_scalar_div_kernel!(v::CuDeviceVector{Float64}, 
+                                          scalar::Float64,
+                                          n::Int)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= n
+        @inbounds v[i] /= scalar
+    end
+    return
 end
