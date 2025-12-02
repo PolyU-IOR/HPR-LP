@@ -23,12 +23,6 @@ function formulation(lp, verbose::Bool=true)
     idxB = findall((lp.lcon .> -Inf) .& (lp.ucon .< Inf))
     idxB = setdiff(idxB, idxE)
 
-    if verbose
-        println("problem information: nRow = ", size(A, 1), ", nCol = ", size(A, 2), ", nnz A = ", nnz(A))
-        println("                     number of equalities = ", length(idxE))
-        println("                     number of inequalities = ", length(idxG) + length(idxL) + length(idxB))
-    end
-
     @assert length(lp.lcon) == length(idxE) + length(idxG) + length(idxL) + length(idxB)
 
     standard_lp = LP_info_cpu(A, transpose(A), lp.c, lp.lcon, lp.ucon, lp.lvar, lp.uvar, lp.c0)
@@ -474,7 +468,7 @@ end
 Build an LP model from matrix form.
 
 # Arguments
-- `A::SparseMatrixCSC`: Constraint matrix (m × n)
+- `A::Union{SparseMatrixCSC, Matrix}`: Constraint matrix (m × n). Dense matrices will be automatically converted to sparse format with a warning.
 - `c::Vector{Float64}`: Objective coefficients (length n)
 - `AL::Vector{Float64}`: Lower bounds for constraints Ax (length m)
 - `AU::Vector{Float64}`: Upper bounds for constraints Ax (length m)
@@ -503,7 +497,7 @@ result = solve(model, params)
 
 See also: [`build_from_mps`](@ref), [`solve`](@ref)
 """
-function build_from_Abc(A::SparseMatrixCSC,
+function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     c::Vector{Float64},
     AL::Vector{Float64},
     AU::Vector{Float64},
@@ -511,8 +505,16 @@ function build_from_Abc(A::SparseMatrixCSC,
     u::Vector{Float64},
     obj_constant::Float64=0.0)
     
+    # Convert dense matrix to sparse if needed
+    if A isa Matrix
+        @warn "Dense matrix detected. Converting to sparse format. For better performance, please provide a SparseMatrixCSC."
+        A_sparse = sparse(A)
+    else
+        A_sparse = A
+    end
+    
     # Create copies to avoid modifying the input
-    A_copy = copy(A)
+    A_copy = copy(A_sparse)
     c_copy = copy(c)
     AL_copy = copy(AL)
     AU_copy = copy(AU)
@@ -523,17 +525,6 @@ function build_from_Abc(A::SparseMatrixCSC,
     standard_lp = LP_info_cpu(A_copy, transpose(A_copy), c_copy, AL_copy, AU_copy, l_copy, u_copy, obj_constant)
     
     return standard_lp
-end
-
-# Internal helper function used by run_dataset
-function run_file_internal(FILE_NAME::String, params::HPRLP_parameters)
-    # Build the model from MPS file
-    model = build_from_mps(FILE_NAME, verbose=params.verbose)
-    
-    # Solve the model (scaling is done inside solve)
-    results = solve(model, params)
-
-    return results
 end
 
 # the function to test the HPR-LP algorithm on a dataset
@@ -583,7 +574,6 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
     end
 
 
-    warm_up_done = false
     for i = 1:length(files)
         file = files[i]
         if file in namelist
@@ -592,29 +582,18 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
         if occursin(".mps", file) && !(file in namelist)
             FILE_NAME = joinpath(data_path, file)
             println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
-            # println(file)
 
             redirect_stdout(io) do
                 println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
-                if params.warm_up && !warm_up_done
-                    warm_up_done = true
-                    println("warm up starts: ---------------------------------------------------------------------------------------------------------- ")
-                    t_start_all = time()
-                    max_iter = params.max_iter
-                    params.max_iter = 200
-                    results = run_file_internal(FILE_NAME, params)
-                    params.max_iter = max_iter
-                    all_time = time() - t_start_all
-                    println("warm up time: ", all_time)
-                    println("warm up ends ----------------------------------------------------------------------------------------------------------")
-                end
-
-
-                println("main run starts: ----------------------------------------------------------------------------------------------------------")
+                println("Solving: ----------------------------------------------------------------------------------------------------------")
                 t_start_all = time()
-                results = run_file_internal(FILE_NAME, params)
+                
+                # Build and solve the model
+                model = build_from_mps(FILE_NAME, verbose=params.verbose)
+                results = solve(model, params)
+                
                 all_time = time() - t_start_all
-                println("main run ends----------------------------------------------------------------------------------------------------------")
+                println("Solve complete ----------------------------------------------------------------------------------------------------------")
 
 
                 println("iter = ", results.iter,

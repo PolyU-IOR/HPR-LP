@@ -818,10 +818,26 @@ function setup_scaling(lp::Union{LP_info_cpu, LP_info_gpu}, params::HPRLP_parame
 end
 
 # Helper function to print solver parameters
-function print_solver_parameters(params::HPRLP_parameters, m::Int, n::Int)
+function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu, LP_info_gpu})
+    m, n = size(lp.A)
+    
+    # Count constraint types
+    AL = lp.AL isa CuArray ? Vector(lp.AL) : lp.AL
+    AU = lp.AU isa CuArray ? Vector(lp.AU) : lp.AU
+    
+    num_equalities = count(AL .== AU)
+    num_inequalities = m - num_equalities
+    nnz_A = nnz(lp.A isa CuSparseMatrixCSR ? SparseMatrixCSC(lp.A) : lp.A)
+    
     println("="^80)
+    println("PROBLEM INFORMATION:")
+    println("  Rows (constraints): m = ", m)
+    println("  Columns (variables): n = ", n)
+    println("  Non-zeros in A: ", nnz_A)
+    println("  Equalities: ", num_equalities)
+    println("  Inequalities: ", num_inequalities)
+    println()
     println("SOLVER PARAMETERS:")
-    println("  Problem size: m = ", m, ", n = ", n)
     println("  Device: ", params.use_gpu ? "GPU (device $(params.device_number))" : "CPU")
     println("  Stop tolerance: ", params.stoptol)
     println("  Max iterations: ", params.max_iter)
@@ -1108,13 +1124,10 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         println("HPR-LP version v0.1.3")
     end
     t_start_alg = time()
-    
-    # Get problem dimensions
-    m, n = size(lp.A)
 
     # Print solver parameters
     if params.verbose
-        print_solver_parameters(params, m, n)
+        print_solver_parameters(params, lp)
     end
 
     # Initialization
@@ -1180,7 +1193,19 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         # Collect results and return if terminated
         if status != "CONTINUE"
             if params.verbose
-                println("Termination reason: ", status, ", accuracy = ", residuals.KKTx_and_gap_org_bar)
+                println("\n", "="^80)
+                println("SOLUTION SUMMARY")
+                println("="^80)
+                println("Status: ", status)
+                println("Iterations: ", iter)
+                println("Time: ", @sprintf("%.4f", time() - t_start_alg), " seconds")
+                println("Primal Objective: ", @sprintf("%+.12e", residuals.primal_obj_bar))
+                println("Dual Objective: ", @sprintf("%+.12e", residuals.dual_obj_bar))
+                println("Primal Residual: ", @sprintf("%.6e", residuals.err_Rp_org_bar))
+                println("Dual Residual: ", @sprintf("%.6e", residuals.err_Rd_org_bar))
+                println("Relative Gap: ", @sprintf("%.6e", residuals.rel_gap_bar))
+                println("KKT Error: ", @sprintf("%.6e", residuals.KKTx_and_gap_org_bar))
+                println("="^80)
             end
             results = collect_results!(ws, residuals, scaling_info, iter, t_start_alg, power_time, status, tolerance_times, tolerance_iters)
             return results
