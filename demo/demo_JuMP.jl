@@ -41,3 +41,11 @@ if has_values(model)
     println("x1 = ", value(model[:x1]))
     println("x2 = ", value(model[:x2]))
 end
+
+## Usage 2: read a model from file
+mps_file_path = "model.mps" # your file path
+model = read_from_file(mps_file_path)
+## set HPRLP as the optimizer
+set_optimizer(model, HPRLP.Optimizer)
+## solve it
+optimize!(model)

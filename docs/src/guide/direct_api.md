@@ -21,11 +21,17 @@ c = [-3.0, -5.0]
 l = [0.0, 0.0]
 u = [Inf, Inf]
 
+# Step 1: Build the model
+model = build_from_Abc(A, c, AL, AU, l, u)
+
+# Step 2: Set parameters
 params = HPRLP_parameters()
 params.use_gpu = false
 
-result = run_lp(A, AL, AU, c, l, u, 0.0, params)
+# Step 3: Optimize
+result = optimize(model, params)
 
+println("Status: ", result.status)
 println("Optimal value: ", result.primal_obj)
 println("Solution: ", result.x)
 ```
@@ -84,11 +90,14 @@ c = [1.0, 2.0, 3.0]
 l = [0.0, 0.0, -Inf]
 u = [5.0, Inf, Inf]
 
+# Build and solve
+model = build_from_Abc(A, c, AL, AU, l, u)
+
 params = HPRLP_parameters()
 params.use_gpu = false
 params.verbose = true
 
-result = run_lp(A, AL, AU, c, l, u, 0.0, params)
+result = optimize(model, params)
 
 println("\nResults:")
 println("Status: ", result.status)
@@ -98,21 +107,56 @@ println("Solution: x = ", result.x)
 
 ## Working with Dense Matrices
 
-If your problem uses dense matrices, convert to sparse:
+Dense matrices are automatically converted to sparse format:
 
 ```julia
 using SparseArrays
 
-# Dense matrix
+# Dense matrix (will be converted automatically with a warning)
 A_dense = [1.0 2.0 3.0;
            4.0 5.0 6.0;
            7.0 8.0 9.0]
 
-# Convert to sparse
-A_sparse = sparse(A_dense)
+# build_from_Abc will convert it to sparse automatically
+model = build_from_Abc(A_dense, c, AL, AU, l, u)
 
 # Then solve as usual
-result = run_lp(A_sparse, AL, AU, c, l, u, 0.0, params)
+params = HPRLP_parameters()
+result = optimize(model, params)
+```
+
+## Warm-Start with Initial Solutions
+
+Provide initial primal/dual solutions to warm-start the solver:
+
+```julia
+# From previous solve or heuristic
+x0 = [1.0, 2.0]
+y0 = [0.5, 0.3]
+
+params = HPRLP_parameters()
+params.initial_x = x0
+params.initial_y = y0  # Optional
+
+model = build_from_Abc(A, c, AL, AU, l, u)
+result = optimize(model, params)
+```
+
+Useful for solving sequences of related problems or re-solving with different parameters.
+
+## Auto-Save Best Solution
+
+Automatically save the best solution found during optimization to HDF5:
+
+```julia
+params = HPRLP_parameters()
+params.auto_save = true
+params.save_filename = "my_optimization.h5"
+
+result = optimize(model, params)
+```
+
+Useful for long optimizations that might be interrupted or reach time limits.
 ```
 
 ## See Also

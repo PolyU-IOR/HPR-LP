@@ -38,8 +38,14 @@ set_optimizer_attribute(model, "stoptol", 1e-6)
 set_optimizer_attribute(model, "use_gpu", true)
 set_optimizer_attribute(model, "device_number", 0)
 set_optimizer_attribute(model, "use_Ruiz_scaling", true)
-set_optimizer_attribute(model, "warm_up", false)
+set_optimizer_attribute(model, "warm_up", true)
 set_optimizer_attribute(model, "max_iter", 100000)
+
+# New features: warm-start and auto-save
+set_optimizer_attribute(model, "initial_x", x0)  # Warm-start primal
+set_optimizer_attribute(model, "initial_y", y0)  # Warm-start dual
+set_optimizer_attribute(model, "auto_save", true)
+set_optimizer_attribute(model, "save_filename", "optimization.h5")
 ```
 
 !!! tip "Parameter Reference"

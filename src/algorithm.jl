@@ -1121,7 +1121,7 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
     
     # Main optimization algorithm
     if params.verbose
-        println("HPR-LP version v0.1.3")
+        println("HPR-LP version v0.1.4")
     end
     t_start_alg = time()
 

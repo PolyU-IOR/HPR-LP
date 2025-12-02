@@ -7,12 +7,15 @@ HPRLP can directly read and solve linear programming problems in MPS (Mathematic
 ```julia
 using HPRLP
 
-# Configure solver parameters
-params = HPRLP_parameters()
-params.stoptol = 1e-4        # Set stopping tolerance
+# Step 1: Build model from MPS file
+model = build_from_mps("path/to/problem.mps")
 
-# Solve MPS file
-result = run_single("path/to/problem.mps", params)
+# Step 2: Configure solver parameters
+params = HPRLP_parameters()
+params.stoptol = 1e-4
+
+# Step 3: Optimize
+result = optimize(model, params)
 ```
 
 ## Working with MPS Files
@@ -22,9 +25,14 @@ result = run_single("path/to/problem.mps", params)
 ```julia
 using HPRLP
 
-# Simple solve with defaults
+# Build the model
+model = build_from_mps("model.mps")
+
+# Set up parameters
 params = HPRLP_parameters()
-result = run_single("model.mps", params)
+
+# Solve
+result = optimize(model, params)
 
 if result.status == "OPTIMAL"
     println("Found optimal solution!")
@@ -38,15 +46,19 @@ end
 ### With Custom Parameters
 
 ```julia
-params = HPRLP_parameters()
+# Build model
+model = build_from_mps("large_problem.mps")
 
-# Solver settings
+# Configure parameters
+params = HPRLP_parameters()
 params.stoptol = 1e-9          # Higher accuracy
 params.time_limit = 3600       # 1 hour time limit
 params.use_gpu = true          # Enable GPU
 params.verbose = true          # Show progress
+params.warm_up = true          # Enable warmup for accurate timing
 
-result = run_single("large_problem.mps", params)
+# Solve
+result = optimize(model, params)
 ```
 
 !!! tip "Parameter Reference"

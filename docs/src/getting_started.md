@@ -60,22 +60,24 @@ using SparseArrays
 # Convert to standard form: AL ≤ Ax ≤ AU
 # Inequality ax + by ≤ c becomes -ax - by ≥ -c (i.e., AL = -c, AU = ∞)
 A = sparse([-1.0 -2.0; -3.0 -1.0])
+c = [-3.0, -5.0]
 AL = [-10.0, -12.0]
 AU = [Inf, Inf]
-c = [-3.0, -5.0]
 l = [0.0, 0.0]
 u = [Inf, Inf]
-obj_constant = 0.0
 
-# Set up parameters
+# Step 1: Build the model
+model = build_from_Abc(A, c, AL, AU, l, u)
+
+# Step 2: Set up parameters
 params = HPRLP_parameters()
 params.use_gpu = false      # Use CPU for this small problem
-params.stoptol = 1e-4      # Convergence tolerance
-params.time_limit = 60     # Maximum 60 seconds
-params.verbose = true      # Print solver output
+params.stoptol = 1e-4       # Convergence tolerance
+params.time_limit = 60      # Maximum 60 seconds
+params.verbose = true       # Print solver output
 
-# Solve
-result = run_lp(A, AL, AU, c, l, u, obj_constant, params)
+# Step 3: Solve
+result = optimize(model, params)
 
 # Check results
 println("Status: ", result.status)
@@ -126,9 +128,14 @@ println("Solve time: ", solve_time(model), " seconds")
 ```julia
 using HPRLP
 
-# Simple solve with defaults
+# Build model from file
+model = build_from_mps("model.mps")
+
+# Set parameters
 params = HPRLP_parameters()
-result = run_single("model.mps", params)
+
+# Solve
+result = optimize(model, params)
 ```
 
 ## Next Steps

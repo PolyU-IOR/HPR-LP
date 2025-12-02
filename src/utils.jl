@@ -430,10 +430,10 @@ using HPRLP
 
 model = build_from_mps("problem.mps")
 params = HPRLP_parameters()
-result = solve(model, params)
+result = optimize(model, params)
 ```
 
-See also: [`build_from_Abc`](@ref), [`solve`](@ref)
+See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
 function build_from_mps(filename::String; verbose::Bool=true)
     t_start = time()
@@ -492,10 +492,10 @@ u = [Inf, Inf]
 
 model = build_from_Abc(A, c, AL, AU, l, u)
 params = HPRLP_parameters()
-result = solve(model, params)
+result = optimize(model, params)
 ```
 
-See also: [`build_from_mps`](@ref), [`solve`](@ref)
+See also: [`build_from_mps`](@ref), [`optimize`](@ref)
 """
 function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     c::Vector{Float64},

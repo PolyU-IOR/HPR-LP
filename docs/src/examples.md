@@ -23,16 +23,19 @@ using SparseArrays
 
 # Standard form: AL ≤ Ax ≤ AU
 A = sparse([-1.0 -2.0; -3.0 -1.0])
+c = [-3.0, -5.0]
 AL = [-10.0, -12.0]
 AU = [Inf, Inf]
-c = [-3.0, -5.0]
 l = [0.0, 0.0]
 u = [Inf, Inf]
+
+# Build and solve
+model = build_from_Abc(A, c, AL, AU, l, u)
 
 params = HPRLP_parameters()
 params.use_gpu = false
 
-result = run_lp(A, AL, AU, c, l, u, 0.0, params)
+result = optimize(model, params)
 
 println("Status: ", result.status)
 println("Objective: ", result.primal_obj)
@@ -46,12 +49,17 @@ Read and solve a problem from an MPS file.
 ```julia
 using HPRLP
 
+# Build model from file
+model = build_from_mps("problem.mps")
+
+# Configure parameters
 params = HPRLP_parameters()
 params.stoptol = 1e-6
 params.use_gpu = true
 params.verbose = true
 
-result = run_single("problem.mps", params)
+# Solve
+result = optimize(model, params)
 
 if result.status == "OPTIMAL"
     println("✓ Optimal solution found!")
@@ -81,6 +89,63 @@ optimize!(model)
 println("Status: ", termination_status(model))
 println("Objective: ", objective_value(model))
 println("x1 = ", value(x1), ", x2 = ", value(x2))
+```
+
+## Example 4: Using Warm-Start
+
+Solve related problems with warm-start.
+
+```julia
+using HPRLP
+using SparseArrays
+
+A = sparse([1.0 2.0; 3.0 1.0])
+c = [-3.0, -5.0]
+AL = [-Inf, -Inf]
+AU = [10.0, 12.0]
+l = [0.0, 0.0]
+u = [Inf, Inf]
+
+# First solve
+model = build_from_Abc(A, c, AL, AU, l, u)
+params = HPRLP_parameters()
+result1 = optimize(model, params)
+
+# Solve modified problem with warm-start
+AU_new = [11.0, 12.0]
+model2 = build_from_Abc(A, c, AL, AU_new, l, u)
+params.initial_x = result1.x
+params.initial_y = result1.y
+result2 = optimize(model2, params)
+```
+
+## Example 5: Auto-Save Feature
+
+Enable auto-save for long optimizations.
+
+```julia
+using HPRLP
+
+model = build_from_mps("large_problem.mps")
+
+params = HPRLP_parameters()
+params.time_limit = 3600
+params.auto_save = true
+params.save_filename = "best_solution.h5"
+
+result = optimize(model, params)
+```
+
+## Example 6: Reading Auto-Saved Results
+
+```julia
+using HDF5
+
+h5open("best_solution.h5", "r") do file
+    x_best = read(file, "x")
+    y_best = read(file, "y")
+    println("Best solution found at iteration: ", read(file, "iter"))
+end
 ```
 
 

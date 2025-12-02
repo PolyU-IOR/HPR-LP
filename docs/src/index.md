@@ -61,16 +61,19 @@ using SparseArrays
 
 # Define LP: min -3x₁ - 5x₂ s.t. x₁ + 2x₂ ≤ 10, 3x₁ + x₂ ≤ 12, x ≥ 0
 A = sparse([-1.0 -2.0; -3.0 -1.0])
+c = [-3.0, -5.0]
 AL = [-10.0, -12.0]
 AU = [Inf, Inf]
-c = [-3.0, -5.0]
 l = [0.0, 0.0]
 u = [Inf, Inf]
+
+# Build and solve
+model = build_from_Abc(A, c, AL, AU, l, u)
 
 params = HPRLP_parameters()
 params.stoptol = 1e-9  # Set stopping tolerance
 
-result = run_lp(A, AL, AU, c, l, u, 0.0, params)
+result = optimize(model, params)
 
 println("Optimal value: ", result.primal_obj)
 println("Solution: x = ", result.x)

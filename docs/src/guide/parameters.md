@@ -18,6 +18,10 @@ HPRLP provides extensive customization through the `HPRLP_parameters` type. This
 | `warm_up` | Bool | true | true/false | GPU warm-up |
 | `print_frequency` | Int | -1 | -1 or > 0 | Print interval (-1=auto) |
 | `verbose` | Bool | true | true/false | Enable output |
+| `initial_x` | Vector/Nothing | nothing | - | Initial primal solution |
+| `initial_y` | Vector/Nothing | nothing | - | Initial dual solution |
+| `auto_save` | Bool | false | true/false | Auto-save best solution |
+| `save_filename` | String | "hprlp_autosave.h5" | - | HDF5 filename for auto-save |
 
 
 ## Creating Parameters
@@ -172,6 +176,46 @@ params.print_frequency = 100   # Print every 100 iterations
 params.print_frequency = 1     # Print every iteration (very verbose)
 ```
 
+## Warm-Start Parameters
+
+### `initial_x::Union{Vector{Float64},Nothing}`
+**Default:** `nothing`
+
+Initial primal solution to warm-start the solver.
+
+```julia
+params.initial_x = x0  # From previous solve or heuristic
+```
+
+### `initial_y::Union{Vector{Float64},Nothing}`
+**Default:** `nothing`
+
+Initial dual solution to warm-start the solver.
+
+```julia
+params.initial_y = y0  # Optional, can use with or without initial_x
+```
+
+## Auto-Save Parameters
+
+### `auto_save::Bool`
+**Default:** `false`
+
+Automatically save the best solution found during optimization to HDF5.
+
+```julia
+params.auto_save = true
+```
+
+### `save_filename::String`
+**Default:** `"hprlp_autosave.h5"`
+
+Filename for the HDF5 file used by auto-save.
+
+```julia
+params.save_filename = "my_problem.h5"
+```
+
 ## Common Configurations
 
 ### High Accuracy
@@ -199,6 +243,14 @@ params.use_gpu = false
 params = HPRLP_parameters()
 params.verbose = false
 params.warm_up = false
+```
+
+### With Auto-Save and Warm-Start
+```julia
+params = HPRLP_parameters()
+params.auto_save = true
+params.save_filename = "backup.h5"
+params.initial_x = x0
 ```
 
 ### Debugging/Analysis

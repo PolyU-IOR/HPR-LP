@@ -46,8 +46,9 @@ optimize!(model)
 
 ```julia
 using HPRLP
+model = build_from_mps("path/to/problem.mps")
 params = HPRLP_parameters()
-result = run_single("path/to/problem.mps", params)
+result = optimize(model, params)
 ```
 
 [→ See MPS Files Guide](mps_files.md)
@@ -67,7 +68,9 @@ result = run_single("path/to/problem.mps", params)
 ```julia
 using HPRLP, SparseArrays
 A = sparse([...])  # Your constraint matrix
-result = run_lp(A, AL, AU, c, l, u, 0.0, params)
+model = build_from_Abc(A, c, AL, AU, l, u)
+params = HPRLP_parameters()
+result = optimize(model, params)
 ```
 
 [→ See Direct API Guide](direct_api.md)
