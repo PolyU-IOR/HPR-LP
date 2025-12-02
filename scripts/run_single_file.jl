@@ -17,4 +17,4 @@ params.warm_up = true
 result = HPRLP.optimize(model, params)
 
 println("Objective value: ", result.primal_obj)
-println("Status: ", result.output_type)
+println("Status: ", result.status)

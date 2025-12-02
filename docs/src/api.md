@@ -52,7 +52,7 @@ params.time_limit = 3600   # Time limit (seconds)
 ### Accessing Results
 
 ```julia
-result.output_type    # "OPTIMAL", "MAX_ITER", or "TIME_LIMIT"
+result.status    # "OPTIMAL", "MAX_ITER", or "TIME_LIMIT"
 result.primal_obj     # Objective value
 result.x              # Solution vector
 result.iter           # Iterations

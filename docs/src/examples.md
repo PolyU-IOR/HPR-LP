@@ -34,7 +34,7 @@ params.use_gpu = false
 
 result = run_lp(A, AL, AU, c, l, u, 0.0, params)
 
-println("Status: ", result.output_type)
+println("Status: ", result.status)
 println("Objective: ", result.primal_obj)
 println("Solution: x₁ = ", result.x[1], ", x₂ = ", result.x[2])
 ```
@@ -53,7 +53,7 @@ params.verbose = true
 
 result = run_single("problem.mps", params)
 
-if result.output_type == "OPTIMAL"
+if result.status == "OPTIMAL"
     println("✓ Optimal solution found!")
     println("  Objective: ", result.primal_obj)
     println("  Time: ", result.time, " seconds")

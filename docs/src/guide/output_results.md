@@ -8,7 +8,7 @@ All HPRLP solving functions return an `HPRLP_results` object with the following 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `output_type` | String | Termination status: `"OPTIMAL"`, `"MAX_ITER"`, or `"TIME_LIMIT"` |
+| `status` | String | Termination status: `"OPTIMAL"`, `"MAX_ITER"`, or `"TIME_LIMIT"` |
 | `x` | Vector{Float64} | Primal solution (decision variables) |
 | `y` | Vector{Float64} | Dual variables for constraints |
 | `z` | Vector{Float64} | Dual variables for bounds |
@@ -27,7 +27,7 @@ All HPRLP solving functions return an `HPRLP_results` object with the following 
 result = run_lp(A, AL, AU, c, l, u, c0, params)
 
 # Access results
-println("Status: ", result.output_type)
+println("Status: ", result.status)
 println("Objective: ", result.primal_obj)
 println("Solution: ", result.x)
 println("Time: ", result.time, " seconds")
@@ -37,7 +37,7 @@ println("Time: ", result.time, " seconds")
 
 ### Termination Status
 
-#### `output_type::String`
+#### `status::String`
 Indicates why the solver stopped:
 
 - **`"OPTIMAL"`** - Successfully found an optimal solution within tolerance
@@ -45,14 +45,14 @@ Indicates why the solver stopped:
 - **`"TIME_LIMIT"`** - Reached time limit before converging
 
 ```julia
-if result.output_type == "OPTIMAL"
+if result.status == "OPTIMAL"
     println("✓ Optimal solution found!")
     println("Objective value: ", result.primal_obj)
-elseif result.output_type == "MAX_ITER"
+elseif result.status == "MAX_ITER"
     println("⚠ Iteration limit reached")
     println("Best objective: ", result.primal_obj)
     println("Residual: ", result.residuals)
-elseif result.output_type == "TIME_LIMIT"
+elseif result.status == "TIME_LIMIT"
     println("⚠ Time limit reached")
     println("Best objective: ", result.primal_obj)
 end
@@ -140,8 +140,8 @@ println("Objective gap: ", result.gap)
 
 ```julia
 function check_solution_quality(result, params)
-    if result.output_type != "OPTIMAL"
-        @warn "Solution not optimal: $(result.output_type)"
+    if result.status != "OPTIMAL"
+        @warn "Solution not optimal: $(result.status)"
     end
     
     if result.residuals > params.stoptol
@@ -152,7 +152,7 @@ function check_solution_quality(result, params)
         @warn "Large objective gap: $(result.gap)"
     end
     
-    return result.output_type == "OPTIMAL" && 
+    return result.status == "OPTIMAL" && 
            result.residuals <= params.stoptol
 end
 ```
@@ -192,7 +192,7 @@ params = HPRLP_parameters()
 result = run_single("problem.mps", params)
 
 println("═══════ Solution Summary ═══════")
-println("Status:     ", result.output_type)
+println("Status:     ", result.status)
 println("Objective:  ", result.primal_obj)
 println("Iterations: ", result.iter)
 println("Time:       ", round(result.time, digits=3), " sec")
@@ -210,7 +210,7 @@ function analyze_results(result, params)
     
     # Termination status
     println("\n[Termination]")
-    println("  Status: ", result.output_type)
+    println("  Status: ", result.status)
     
     # Objective information
     println("\n[Objective]")
@@ -273,7 +273,7 @@ function compare_results(result1, result2, label1="Result 1", label2="Result 2")
     println("-"^60)
     
     println(rpad("Status", 20), 
-            rpad(result1.output_type, 20), result2.output_type)
+            rpad(result1.status, 20), result2.status)
     println(rpad("Objective", 20), 
             rpad(string(round(result1.primal_obj, digits=6)), 20),
             round(result2.primal_obj, digits=6))
@@ -308,7 +308,7 @@ compare_results(result_gpu, result_cpu, "GPU", "CPU")
 If solver stops with `MAX_ITER` or `TIME_LIMIT`:
 
 ```julia
-if result.output_type != "OPTIMAL"
+if result.status != "OPTIMAL"
     # Check if close to optimal
     if result.residuals < 1e-3
         println("Near-optimal solution found")

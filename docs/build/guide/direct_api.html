@@ -62,7 +62,7 @@ params.verbose = true
 result = run_lp(A, AL, AU, c, l, u, 0.0, params)
 
 println(&quot;\nResults:&quot;)
-println(&quot;Status: &quot;, result.output_type)
+println(&quot;Status: &quot;, result.status)
 println(&quot;Objective: &quot;, result.primal_obj)
 println(&quot;Solution: x = &quot;, result.x)</code></pre><h2 id="Working-with-Dense-Matrices"><a class="docs-heading-anchor" href="#Working-with-Dense-Matrices">Working with Dense Matrices</a><a id="Working-with-Dense-Matrices-1"></a><a class="docs-heading-anchor-permalink" href="#Working-with-Dense-Matrices" title="Permalink"></a></h2><p>If your problem uses dense matrices, convert to sparse:</p><pre><code class="language-julia hljs">using SparseArrays
 

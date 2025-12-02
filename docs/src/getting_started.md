@@ -78,7 +78,7 @@ params.verbose = true      # Print solver output
 result = run_lp(A, AL, AU, c, l, u, obj_constant, params)
 
 # Check results
-println("Status: ", result.output_type)
+println("Status: ", result.status)
 println("Optimal value: ", result.primal_obj)
 println("Solution: x₁ = ", result.x[1], ", x₂ = ", result.x[2])
 println("Iterations: ", result.iter)

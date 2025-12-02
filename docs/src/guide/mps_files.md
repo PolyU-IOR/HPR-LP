@@ -26,12 +26,12 @@ using HPRLP
 params = HPRLP_parameters()
 result = run_single("model.mps", params)
 
-if result.output_type == "OPTIMAL"
+if result.status == "OPTIMAL"
     println("Found optimal solution!")
     println("Objective: ", result.primal_obj)
     println("Solution vector: ", result.x)
 else
-    println("Solver stopped with status: ", result.output_type)
+    println("Solver stopped with status: ", result.status)
 end
 ```
 

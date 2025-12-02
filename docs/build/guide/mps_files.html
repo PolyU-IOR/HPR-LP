@@ -12,12 +12,12 @@ result = run_single(&quot;path/to/problem.mps&quot;, params)</code></pre><h2 id=
 params = HPRLP_parameters()
 result = run_single(&quot;model.mps&quot;, params)
 
-if result.output_type == &quot;OPTIMAL&quot;
+if result.status == &quot;OPTIMAL&quot;
     println(&quot;Found optimal solution!&quot;)
     println(&quot;Objective: &quot;, result.primal_obj)
     println(&quot;Solution vector: &quot;, result.x)
 else
-    println(&quot;Solver stopped with status: &quot;, result.output_type)
+    println(&quot;Solver stopped with status: &quot;, result.status)
 end</code></pre><h3 id="With-Custom-Parameters"><a class="docs-heading-anchor" href="#With-Custom-Parameters">With Custom Parameters</a><a id="With-Custom-Parameters-1"></a><a class="docs-heading-anchor-permalink" href="#With-Custom-Parameters" title="Permalink"></a></h3><pre><code class="language-julia hljs">params = HPRLP_parameters()
 
 # Solver settings

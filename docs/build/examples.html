@@ -21,7 +21,7 @@ params.use_gpu = false
 
 result = run_lp(A, AL, AU, c, l, u, 0.0, params)
 
-println(&quot;Status: &quot;, result.output_type)
+println(&quot;Status: &quot;, result.status)
 println(&quot;Objective: &quot;, result.primal_obj)
 println(&quot;Solution: x₁ = &quot;, result.x[1], &quot;, x₂ = &quot;, result.x[2])</code></pre><h2 id="Example-2:-MPS-Files"><a class="docs-heading-anchor" href="#Example-2:-MPS-Files">Example 2: MPS Files</a><a id="Example-2:-MPS-Files-1"></a><a class="docs-heading-anchor-permalink" href="#Example-2:-MPS-Files" title="Permalink"></a></h2><p>Read and solve a problem from an MPS file.</p><pre><code class="language-julia hljs">using HPRLP
 
@@ -32,7 +32,7 @@ params.verbose = true
 
 result = run_single(&quot;problem.mps&quot;, params)
 
-if result.output_type == &quot;OPTIMAL&quot;
+if result.status == &quot;OPTIMAL&quot;
     println(&quot;✓ Optimal solution found!&quot;)
     println(&quot;  Objective: &quot;, result.primal_obj)
     println(&quot;  Time: &quot;, result.time, &quot; seconds&quot;)

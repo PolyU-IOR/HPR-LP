@@ -91,7 +91,7 @@ params.verbose = true
 result = run_lp(A, AL, AU, c, l, u, 0.0, params)
 
 println("\nResults:")
-println("Status: ", result.output_type)
+println("Status: ", result.status)
 println("Objective: ", result.primal_obj)
 println("Solution: x = ", result.x)
 ```

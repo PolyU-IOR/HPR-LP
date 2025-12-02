@@ -32,7 +32,7 @@ params.verbose = true      # Print solver output
 result = run_lp(A, AL, AU, c, l, u, obj_constant, params)
 
 # Check results
-println(&quot;Status: &quot;, result.output_type)
+println(&quot;Status: &quot;, result.status)
 println(&quot;Optimal value: &quot;, result.primal_obj)
 println(&quot;Solution: x₁ = &quot;, result.x[1], &quot;, x₂ = &quot;, result.x[2])
 println(&quot;Iterations: &quot;, result.iter)

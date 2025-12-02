@@ -43,7 +43,7 @@ optimize!(model)</code></pre><h3 id="Common-Parameter-Settings"><a class="docs-h
 params.stoptol = 1e-6      # Convergence tolerance
 params.use_gpu = true      # Enable GPU
 params.verbose = false     # Silent mode
-params.time_limit = 3600   # Time limit (seconds)</code></pre><h3 id="Accessing-Results"><a class="docs-heading-anchor" href="#Accessing-Results">Accessing Results</a><a id="Accessing-Results-1"></a><a class="docs-heading-anchor-permalink" href="#Accessing-Results" title="Permalink"></a></h3><pre><code class="language-julia hljs">result.output_type    # &quot;OPTIMAL&quot;, &quot;MAX_ITER&quot;, or &quot;TIME_LIMIT&quot;
+params.time_limit = 3600   # Time limit (seconds)</code></pre><h3 id="Accessing-Results"><a class="docs-heading-anchor" href="#Accessing-Results">Accessing Results</a><a id="Accessing-Results-1"></a><a class="docs-heading-anchor-permalink" href="#Accessing-Results" title="Permalink"></a></h3><pre><code class="language-julia hljs">result.status    # &quot;OPTIMAL&quot;, &quot;MAX_ITER&quot;, or &quot;TIME_LIMIT&quot;
 result.primal_obj     # Objective value
 result.x              # Solution vector
 result.iter           # Iterations
