@@ -33,4 +33,5 @@ deploydocs(
     repo = "github.com/PolyU-IOR/HPR-LP.git",
     devbranch = "main",
     push_preview = true,
+    forcepush = true,
 )
