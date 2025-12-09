@@ -528,9 +528,6 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
         ws.y_bar .= ws.y
         ws.last_y .= ws.y
 
-        # Compute y_obj based on y_bar
-        compute_y_obj_gpu!(ws.y_obj, ws.y_bar, ws.AL, ws.AU, m)
-
         # Compute z_bar = c - AT * y_bar
         CUDA.CUSPARSE.cusparseSpMV(ws.spmv_AT.handle, ws.spmv_AT.operator, ws.spmv_AT.alpha,
             ws.spmv_AT.desc_AT, ws.spmv_AT.desc_y_bar, ws.spmv_AT.beta, ws.spmv_AT.desc_ATy,
@@ -609,17 +606,6 @@ function allocate_workspace_cpu(lp::LP_info_cpu, scaling_info::Scaling_info_cpu,
         ws.y .= scaled_y
         ws.y_bar .= scaled_y
         ws.last_y .= scaled_y
-
-        # Compute y_obj based on y_bar
-        for i in 1:m
-            y_bar_val = ws.y_bar[i]
-            if y_bar_val > 0.0
-                ws.y_obj[i] = ws.AL[i]
-            elseif y_bar_val < 0.0
-                ws.y_obj[i] = ws.AU[i]
-                # else keep y_obj[i] as 0
-            end
-        end
 
         # Compute z_bar = c - AT * y_bar
         mul!(ws.ATy, ws.AT, ws.y_bar)
@@ -1137,6 +1123,23 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
 
     # Power iteration to estimate lambda_max
     power_time = compute_maximum_eigenvalue!(lp, ws, params)
+
+    # Compute y_obj if initial_y was provided (now that lambda_max is known)
+    if params.initial_y !== nothing
+        fact1 = ws.lambda_max * ws.sigma
+        if params.use_gpu
+            # Compute Ax for initial x (or use zeros if no initial x)
+            CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha,
+                ws.spmv_A.desc_A, ws.spmv_A.desc_x_bar, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
+                ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
+            compute_y_obj_gpu!(ws.y_obj, ws.y, ws.AL, ws.AU, ws.Ax, fact1, ws.m)
+        else
+            # Compute Ax for initial x (or use zeros if no initial x)
+            mul!(ws.Ax, ws.A, ws.x_bar)
+            compute_y_obj_cpu!(ws.y_obj, ws.y, ws.AL, ws.AU, ws.Ax, fact1)
+        end
+    end
+
 
     if params.verbose
         println(" iter     errRp        errRd         p_obj            d_obj          gap         sigma       time")
