@@ -954,7 +954,7 @@ function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
     end
     if params.use_gpu
         CUDA.synchronize()
-        lambda_max = power_iteration_gpu(ws.spmv_A, ws.spmv_AT, ws.m, ws.n) * 1.01
+        lambda_max = power_iteration_gpu(ws) * 1.01
         CUDA.synchronize()
     else
         lambda_max = power_iteration_cpu(lp.A, lp.AT) * 1.01

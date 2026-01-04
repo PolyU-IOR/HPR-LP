@@ -329,16 +329,17 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
     return scaling_info
 end
 
-function power_iteration_gpu(ws::HPRLP_workspace_gpu, spmv_A::CUSPARSE_spmv_A, spmv_AT::CUSPARSE_spmv_AT, m::Int, n::Int,
-    max_iterations::Int=5000, tolerance::Float64=1e-4)
+function power_iteration_gpu(ws::HPRLP_workspace_gpu, max_iterations::Int=5000, tolerance::Float64=1e-4)
+    spmv_A = ws.spmv_A
+    spmv_AT = ws.spmv_AT
     seed = 1
     y_copy = copy(ws.y)
     z = ws.Ax
-    z .= CuVector(randn(Random.MersenneTwister(seed), m)) .+ 1e-8 # Initial random vector
+    z .= CuVector(randn(Random.MersenneTwister(seed), ws.m)) .+ 1e-8 # Initial random vector
     q = ws.y
-    q .= CUDA.zeros(Float64, m)
+    q .= CUDA.zeros(Float64, ws.m)
     ATq = ws.ATy
-    ATq .= CUDA.zeros(Float64, n)
+    ATq .= CUDA.zeros(Float64, ws.n)
     lambda_max = 1.0
     for i in 1:max_iterations
         q .= z
