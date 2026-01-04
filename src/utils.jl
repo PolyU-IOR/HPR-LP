@@ -329,22 +329,23 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
     return scaling_info
 end
 
-function power_iteration_gpu(spmv_A::CUSPARSE_spmv_A, spmv_AT::CUSPARSE_spmv_AT, m::Int, n::Int,
+function power_iteration_gpu(ws::HPRLP_workspace_gpu, spmv_A::CUSPARSE_spmv_A, spmv_AT::CUSPARSE_spmv_AT, m::Int, n::Int,
     max_iterations::Int=5000, tolerance::Float64=1e-4)
     seed = 1
-    z = CuVector(randn(Random.MersenneTwister(seed), m)) .+ 1e-8 # Initial random vector
-    q = CUDA.zeros(Float64, m)
-    ATq = CUDA.zeros(Float64, n)
-    desc_q = CUDA.CUSPARSE.CuDenseVectorDescriptor(q)
-    desc_z = CUDA.CUSPARSE.CuDenseVectorDescriptor(z)
-    desc_ATq = CUDA.CUSPARSE.CuDenseVectorDescriptor(ATq)
+    y_copy = copy(ws.y)
+    z = ws.Ax
+    z .= CuVector(randn(Random.MersenneTwister(seed), m)) .+ 1e-8 # Initial random vector
+    q = ws.y
+    q .= CUDA.zeros(Float64, m)
+    ATq = ws.ATy
+    ATq .= CUDA.zeros(Float64, n)
     lambda_max = 1.0
     for i in 1:max_iterations
         q .= z
         q ./= CUDA.norm(q)
-        CUDA.CUSPARSE.cusparseSpMV(spmv_AT.handle, spmv_AT.operator, spmv_AT.alpha, spmv_AT.desc_AT, desc_q, spmv_AT.beta, desc_ATq,
+        CUDA.CUSPARSE.cusparseSpMV(spmv_AT.handle, spmv_AT.operator, spmv_AT.alpha, spmv_AT.desc_AT, spmv_AT.desc_y, spmv_AT.beta, spmv_AT.desc_ATy,
         spmv_AT.compute_type, spmv_AT.alg, spmv_AT.buf)
-        CUDA.CUSPARSE.cusparseSpMV(spmv_A.handle, spmv_A.operator, spmv_A.alpha, spmv_A.desc_A, desc_ATq, spmv_A.beta, desc_z,
+        CUDA.CUSPARSE.cusparseSpMV(spmv_A.handle, spmv_A.operator, spmv_A.alpha, spmv_A.desc_A, spmv_AT.desc_ATy, spmv_A.beta, spmv_A.desc_Ax,
         spmv_A.compute_type, spmv_A.alg, spmv_A.buf)
         lambda_max = CUDA.dot(q, z)
         q .= z .- lambda_max .* q
@@ -352,6 +353,7 @@ function power_iteration_gpu(spmv_A::CUSPARSE_spmv_A, spmv_AT::CUSPARSE_spmv_AT,
             return lambda_max
         end
     end
+    ws.y .= y_copy
     println("Power iteration did not converge within the specified tolerance.")
     println("The maximum iteration is ", max_iterations, " and the error is ", CUDA.norm(q))
     return lambda_max
