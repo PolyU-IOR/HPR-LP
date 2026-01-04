@@ -330,33 +330,38 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
 end
 
 function power_iteration_gpu(
-    ws::HPRLP_workspace_gpu;
+    ws::HPRLP_workspace_gpu,
     max_iterations::Int=5000,
     tolerance::Float64=1e-4,
-    check_every::Int=10,
+    check_every::Int=10;
     seed::Int=1,
 )
     spmv_A = ws.spmv_A
     spmv_AT = ws.spmv_AT
 
-    z = ws.Ax
-    q = ws.y
+    z = ws.Ax      # length m
+    q = ws.y       # length m (must be restored)
+    # ATq = ws.ATy  # length n (written via descriptor spmv_AT.desc_ATy)
 
-    y_copy = copy(q)
-    tol2 = tolerance * tolerance
-    λ = 1.0
+    # Backup ws.y (allocate once per call unless you add a preallocated backup in ws)
+    copyto!(ws.dy, ws.y)
+
+    error = Inf
+    lambda_max = 1.0
 
     try
+        # GPU RNG init (avoid CPU->GPU transfer)
         CUDA.seed!(seed)
         CUDA.randn!(z)
         @. z = z + 1e-8
 
-        nz2 = CUDA.dot(z, z)
-
-        for it = 1:max_iterations
-            invn = inv(sqrt(nz2 + eps(Float64)))
+        for i in 1:max_iterations
+            # Normalize: q = z / ||z||  (1 reduction + 1 broadcast kernel)
+            z2 = CUDA.dot(z, z)
+            invn = inv(sqrt(z2 + eps(Float64)))
             @. q = z * invn
 
+            # z = A * (A' * q)
             CUDA.CUSPARSE.cusparseSpMV(
                 spmv_AT.handle, spmv_AT.operator,
                 spmv_AT.alpha, spmv_AT.desc_AT, spmv_AT.desc_y,
@@ -370,20 +375,24 @@ function power_iteration_gpu(
                 spmv_A.compute_type, spmv_A.alg, spmv_A.buf
             )
 
-            nz2 = CUDA.dot(z, z)   # needed for next normalization
+            lambda_max = CUDA.dot(q, z)
 
-            if (it % check_every == 0)
-                λ = CUDA.dot(q, z)
-                if (nz2 - λ * λ < tol2)
-                    return λ
+            # --- KEEP YOUR STOPPING CRITERION EXACTLY ---
+            if (i % check_every == 0)
+                @. q = z - lambda_max * q
+                error = CUDA.norm(q)
+                if error < tolerance
+                    return lambda_max
                 end
             end
         end
 
-        @warn "Power iteration did not converge" max_iterations λ
-        return λ
+        println("Power iteration did not converge within the specified tolerance.")
+        println("The maximum iteration is ", max_iterations, " and the error is ", error)
+        return lambda_max
     finally
-        copyto!(q, y_copy)
+        # Always restore ws.y
+        copyto!(ws.y, ws.dy)
     end
 end
 
