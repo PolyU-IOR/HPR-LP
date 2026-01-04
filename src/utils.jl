@@ -329,35 +329,62 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
     return scaling_info
 end
 
-function power_iteration_gpu(ws::HPRLP_workspace_gpu, max_iterations::Int=5000, tolerance::Float64=1e-4)
+function power_iteration_gpu(
+    ws::HPRLP_workspace_gpu;
+    max_iterations::Int=5000,
+    tolerance::Float64=1e-4,
+    check_every::Int=10,
+    seed::Int=1,
+)
     spmv_A = ws.spmv_A
     spmv_AT = ws.spmv_AT
-    seed = 1
-    y_copy = copy(ws.y)
+
     z = ws.Ax
-    z .= CuVector(randn(Random.MersenneTwister(seed), ws.m)) .+ 1e-8 # Initial random vector
     q = ws.y
-    q .= CUDA.zeros(Float64, ws.m)
-    ATq = ws.ATy
-    ATq .= CUDA.zeros(Float64, ws.n)
-    lambda_max = 1.0
-    for i in 1:max_iterations
-        q .= z
-        q ./= CUDA.norm(q)
-        CUDA.CUSPARSE.cusparseSpMV(spmv_AT.handle, spmv_AT.operator, spmv_AT.alpha, spmv_AT.desc_AT, spmv_AT.desc_y, spmv_AT.beta, spmv_AT.desc_ATy,
-        spmv_AT.compute_type, spmv_AT.alg, spmv_AT.buf)
-        CUDA.CUSPARSE.cusparseSpMV(spmv_A.handle, spmv_A.operator, spmv_A.alpha, spmv_A.desc_A, spmv_AT.desc_ATy, spmv_A.beta, spmv_A.desc_Ax,
-        spmv_A.compute_type, spmv_A.alg, spmv_A.buf)
-        lambda_max = CUDA.dot(q, z)
-        q .= z .- lambda_max .* q
-        if CUDA.norm(q) < tolerance
-            return lambda_max
+
+    y_copy = copy(q)
+    tol2 = tolerance * tolerance
+    λ = 1.0
+
+    try
+        CUDA.seed!(seed)
+        CUDA.randn!(z)
+        @. z = z + 1e-8
+
+        nz2 = CUDA.dot(z, z)
+
+        for it = 1:max_iterations
+            invn = inv(sqrt(nz2 + eps(Float64)))
+            @. q = z * invn
+
+            CUDA.CUSPARSE.cusparseSpMV(
+                spmv_AT.handle, spmv_AT.operator,
+                spmv_AT.alpha, spmv_AT.desc_AT, spmv_AT.desc_y,
+                spmv_AT.beta, spmv_AT.desc_ATy,
+                spmv_AT.compute_type, spmv_AT.alg, spmv_AT.buf
+            )
+            CUDA.CUSPARSE.cusparseSpMV(
+                spmv_A.handle, spmv_A.operator,
+                spmv_A.alpha, spmv_A.desc_A, spmv_AT.desc_ATy,
+                spmv_A.beta, spmv_A.desc_Ax,
+                spmv_A.compute_type, spmv_A.alg, spmv_A.buf
+            )
+
+            nz2 = CUDA.dot(z, z)   # needed for next normalization
+
+            if (it % check_every == 0)
+                λ = CUDA.dot(q, z)
+                if (nz2 - λ * λ < tol2)
+                    return λ
+                end
+            end
         end
+
+        @warn "Power iteration did not converge" max_iterations λ
+        return λ
+    finally
+        copyto!(q, y_copy)
     end
-    ws.y .= y_copy
-    println("Power iteration did not converge within the specified tolerance.")
-    println("The maximum iteration is ", max_iterations, " and the error is ", CUDA.norm(q))
-    return lambda_max
 end
 
 function power_iteration_cpu(A::SparseMatrixCSC, AT::SparseMatrixCSC,
