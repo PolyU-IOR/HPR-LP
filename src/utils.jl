@@ -396,6 +396,7 @@ function power_iteration_gpu(
     end
 end
 
+
 function power_iteration_cpu(A::SparseMatrixCSC, AT::SparseMatrixCSC,
     max_iterations::Int=5000, tolerance::Float64=1e-4)
     seed = 1

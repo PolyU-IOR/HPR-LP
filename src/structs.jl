@@ -382,6 +382,9 @@ mutable struct HPRLP_workspace_gpu
     # Flag to indicate if backup file has been created in this session
     backup_created::Bool
 
+    # [NEW] Store dynamic Halpern parameters [fact1, fact2] for CUDA Graph
+    halpern_params::CuVector{Float64}
+
     # Default constructor
     HPRLP_workspace_gpu() = new()
 end

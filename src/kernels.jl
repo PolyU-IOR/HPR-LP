@@ -55,6 +55,7 @@ function compute_y_obj_cpu!(y_obj::Vector{Float64}, y::Vector{Float64}, AL::Vect
     end
 end
 
+
 function combined_kernel_x_z_1!(dx::CuDeviceVector{Float64},
     x::CuDeviceVector{Float64},
     z_bar::CuDeviceVector{Float64},
@@ -66,12 +67,15 @@ function combined_kernel_x_z_1!(dx::CuDeviceVector{Float64},
     ATy::CuDeviceVector{Float64},
     c::CuDeviceVector{Float64},
     x0::CuDeviceVector{Float64},
-    fact1::Float64,
-    fact2::Float64,
+    # fact1::Float64,
+    # fact2::Float64,
+    halpern_params::CuDeviceVector{Float64,1},
     n::Int)
 
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
+        fact1 = halpern_params[1]
+        fact2 = halpern_params[2]
         @inbounds begin
             xi = x[i]
             ATy_ci = ATy[i] - c[i]
@@ -103,11 +107,14 @@ function combined_kernel_x_z_2!(
     ATy::CuDeviceVector{Float64},
     c::CuDeviceVector{Float64},
     x0::CuDeviceVector{Float64},
-    fact1::Float64,
-    fact2::Float64,
+    # fact1::Float64,
+    # fact2::Float64,
+    halpern_params::CuDeviceVector{Float64,1},
     n::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
+        fact1 = halpern_params[1]
+        fact2 = halpern_params[2]  
         @inbounds begin
             xi = x[i]
             li = l[i]
@@ -123,15 +130,18 @@ function combined_kernel_x_z_2!(
     return
 end
 
-function update_x_z_gpu!(ws::HPRLP_workspace_gpu, fact1::Float64, fact2::Float64)
+
+function update_x_z_gpu!(ws::HPRLP_workspace_gpu, halpern_params::CuVector{Float64})
     CUDA.CUSPARSE.cusparseSpMV(ws.spmv_AT.handle, ws.spmv_AT.operator, ws.spmv_AT.alpha, ws.spmv_AT.desc_AT, ws.spmv_AT.desc_y, ws.spmv_AT.beta, ws.spmv_AT.desc_ATy,
         ws.spmv_AT.compute_type, ws.spmv_AT.alg, ws.spmv_AT.buf)
     if ws.to_check
-        @cuda threads = 256 blocks = ceil(Int, ws.n / 256) combined_kernel_x_z_1!(ws.dx, ws.x, ws.z_bar, ws.x_bar, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, fact1, fact2, ws.n)
+        @cuda threads = 256 blocks = ceil(Int, ws.n / 256) combined_kernel_x_z_1!(ws.dx, ws.x, ws.z_bar, ws.x_bar, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, halpern_params, ws.n)
     else
-        @cuda threads = 256 blocks = ceil(Int, ws.n / 256) combined_kernel_x_z_2!(ws.x, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, fact1, fact2, ws.n)
+        @cuda threads = 256 blocks = ceil(Int, ws.n / 256) combined_kernel_x_z_2!(ws.x, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, halpern_params, ws.n)
     end
 end
+
+
 
 function update_x_z_cpu!(ws::HPRLP_workspace_cpu, fact1::Float64, fact2::Float64)
     mul!(ws.ATy, ws.AT, ws.y)
@@ -179,12 +189,16 @@ function update_y_kernel_1!(dy::CuDeviceVector{Float64},
     fact1::Float64,
     fact2::Float64,
     y0::CuDeviceVector{Float64},
-    Halpern_fact1::Float64,
-    Halpern_fact2::Float64,
+    # Halpern_fact1::Float64,
+    # Halpern_fact2::Float64,
+    halpern_params::CuDeviceVector{Float64,1},
     m::Int)
 
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= m
+        Halpern_fact1 = halpern_params[1]
+        Halpern_fact2 = halpern_params[2]
+
         @inbounds begin
             yi = y[i]
             ai = Ax[i]
@@ -214,12 +228,16 @@ function update_y_kernel_2!(
     fact1::Float64,
     fact2::Float64,
     y0::CuDeviceVector{Float64},
-    Halpern_fact1::Float64,
-    Halpern_fact2::Float64,
+    # Halpern_fact1::Float64,
+    # Halpern_fact2::Float64,
+    halpern_params::CuDeviceVector{Float64,1},
     m::Int)
 
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= m
+        Halpern_fact1 = halpern_params[1]
+        Halpern_fact2 = halpern_params[2]
+
         @inbounds begin
             yi = y[i]
             ai = Ax[i]
@@ -238,15 +256,15 @@ function update_y_kernel_2!(
     return
 end
 
-function update_y_gpu!(ws::HPRLP_workspace_gpu, Halpern_fact1::Float64, Halpern_fact2::Float64)
+function update_y_gpu!(ws::HPRLP_workspace_gpu, halpern_params::CuVector{Float64})
     CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha, ws.spmv_A.desc_A, ws.spmv_A.desc_x_hat, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
         ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
     fact1 = ws.lambda_max * ws.sigma
     fact2 = 1.0 / fact1
     if ws.to_check
-        @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_kernel_1!(ws.dy, ws.y_bar, ws.y, ws.y_obj, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, Halpern_fact1, Halpern_fact2, ws.m)
+        @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_kernel_1!(ws.dy, ws.y_bar, ws.y, ws.y_obj, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, halpern_params, ws.m)
     else
-        @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_kernel_2!(ws.y,ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, Halpern_fact1, Halpern_fact2, ws.m)
+        @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_kernel_2!(ws.y,ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, halpern_params, ws.m)
     end
 end
 

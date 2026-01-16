@@ -467,6 +467,7 @@ function prepare_spmv!(A::CuSparseMatrixCSR{Float64,Int32}, AT::CuSparseMatrixCS
     return spmv_A, spmv_AT
 end
 
+
 # the function to allocate the workspace for the HPR-LP algorithm
 function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu, params::HPRLP_parameters)
     ws = HPRLP_workspace_gpu()
@@ -499,6 +500,7 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     ws.to_check = false
     ws.spmv_A, ws.spmv_AT = prepare_spmv!(lp.A, lp.AT, ws.x_bar, ws.x_hat, ws.dx, ws.Ax,
         ws.y_bar, ws.y, ws.ATy)
+    
     if scaling_info.norm_b > 1e-8 && scaling_info.norm_c > 1e-8
         ws.sigma = scaling_info.norm_b / scaling_info.norm_c
     else
@@ -549,6 +551,8 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
 
     # Initialize backup flag
     ws.backup_created = false
+
+    ws.halpern_params = CUDA.zeros(Float64, 2)
 
     return ws
 end
@@ -1151,10 +1155,21 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
     tolerance_iters = zeros(Int, length(tolerance_levels))
     tolerance_reached = falses(length(tolerance_levels))
 
+    # halpern_host= CUDA.pin(zeros(Float64, 2))
+
     # Select GPU or CPU function implementations
     compute_residuals!, update_sigma!, collect_results!, update_x_z!, update_y!, compute_weighted_norm! = 
         setup_solver_functions(params.use_gpu)
 
+    # Define graph step function for GPU execution
+    function run_graph_step!(work)
+        update_x_z_gpu!(work, work.halpern_params)
+        update_y_gpu!(work, work.halpern_params)
+    end
+    
+    graph_exec = nothing
+    # ==============================================================
+    
     # Main iteration loop
     for iter = 0:params.max_iter
         # Determine if log should be printed
@@ -1220,6 +1235,11 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         # Restart if needed
         do_restart!(restart_info, ws)
 
+        # Rebuild Graph if restarted
+        if restart_info.restart_flag > 0
+            graph_exec = nothing
+        end
+
         # Determine whether to compute bar points for residuals
         ws.to_check = (rem(iter + 1, params.check_iter) == 0) || (restart_info.restart_flag > 0)
         if params.print_frequency == -1
@@ -1228,11 +1248,37 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
             ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
         end
 
-        # Update x, y, and z
-        fact1 = 1.0 / (restart_info.inner + 2.0)
-        fact2 = 1.0 - fact1
-        update_x_z!(ws, fact1, fact2)
-        update_y!(ws, fact1, fact2)
+        # # Update x, y, and z
+        # fact1 = 1.0 / (restart_info.inner + 2.0)
+        # fact2 = 1.0 - fact1
+        # update_x_z!(ws, fact1, fact2)
+        # update_y!(ws, fact1, fact2)
+        # restart_info.inner += 1
+
+        current_fact1 = 1.0 / (restart_info.inner + 2.0)
+        current_fact2 = 1.0 - current_fact1
+        
+        if params.use_gpu
+            copyto!(ws.halpern_params, [current_fact1, current_fact2])
+
+            if ws.to_check
+                run_graph_step!(ws)
+            else
+                if graph_exec === nothing
+                    run_graph_step!(ws) 
+                    graph = CUDA.capture() do
+                        run_graph_step!(ws)
+                    end
+                    graph_exec = CUDA.instantiate(graph)
+                    # CUDA.launch(graph_exec)
+                else
+                    CUDA.launch(graph_exec)
+                end
+            end
+        else
+            update_x_z!(ws, current_fact1, current_fact2)
+            update_y!(ws, current_fact1, current_fact2)
+        end
         restart_info.inner += 1
 
         # Compute weighted norm
