@@ -55,7 +55,7 @@ function compute_y_obj_cpu!(y_obj::Vector{Float64}, y::Vector{Float64}, AL::Vect
     end
 end
 
-function combined_kernel_x_z_1!(dx::CuDeviceVector{Float64},
+function update_x_z_check_kernel!(dx::CuDeviceVector{Float64},
     x::CuDeviceVector{Float64},
     z_bar::CuDeviceVector{Float64},
     x_bar::CuDeviceVector{Float64},
@@ -66,12 +66,13 @@ function combined_kernel_x_z_1!(dx::CuDeviceVector{Float64},
     ATy::CuDeviceVector{Float64},
     c::CuDeviceVector{Float64},
     x0::CuDeviceVector{Float64},
-    fact1::Float64,
-    fact2::Float64,
+    Halpern_params::CuDeviceVector{Float64,1},
     n::Int)
 
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
+        fact1 = Halpern_params[1]
+        fact2 = Halpern_params[2]
         @inbounds begin
             xi = x[i]
             ATy_ci = ATy[i] - c[i]
@@ -94,7 +95,7 @@ function combined_kernel_x_z_1!(dx::CuDeviceVector{Float64},
 end
 
 # the kernel function to update x_bar, Steps 7, 9, and 10 in Algorithm 2
-function combined_kernel_x_z_2!(
+function update_x_z_normal_kernel!(
     x::CuDeviceVector{Float64},
     x_hat::CuDeviceVector{Float64},
     l::CuDeviceVector{Float64},
@@ -103,11 +104,12 @@ function combined_kernel_x_z_2!(
     ATy::CuDeviceVector{Float64},
     c::CuDeviceVector{Float64},
     x0::CuDeviceVector{Float64},
-    fact1::Float64,
-    fact2::Float64,
+    Halpern_params::CuDeviceVector{Float64,1},
     n::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
+        fact1 = Halpern_params[1]
+        fact2 = Halpern_params[2]
         @inbounds begin
             xi = x[i]
             li = l[i]
@@ -123,17 +125,19 @@ function combined_kernel_x_z_2!(
     return
 end
 
-function update_x_z_gpu!(ws::HPRLP_workspace_gpu, fact1::Float64, fact2::Float64)
+function update_x_z_check_gpu!(ws::HPRLP_workspace_gpu)
     CUDA.CUSPARSE.cusparseSpMV(ws.spmv_AT.handle, ws.spmv_AT.operator, ws.spmv_AT.alpha, ws.spmv_AT.desc_AT, ws.spmv_AT.desc_y, ws.spmv_AT.beta, ws.spmv_AT.desc_ATy,
         ws.spmv_AT.compute_type, ws.spmv_AT.alg, ws.spmv_AT.buf)
-    if ws.to_check
-        @cuda threads = 256 blocks = ceil(Int, ws.n / 256) combined_kernel_x_z_1!(ws.dx, ws.x, ws.z_bar, ws.x_bar, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, fact1, fact2, ws.n)
-    else
-        @cuda threads = 256 blocks = ceil(Int, ws.n / 256) combined_kernel_x_z_2!(ws.x, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, fact1, fact2, ws.n)
-    end
+    @cuda threads = 256 blocks = ceil(Int, ws.n / 256) update_x_z_check_kernel!(ws.dx, ws.x, ws.z_bar, ws.x_bar, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, ws.Halpern_params, ws.n)
 end
 
-function update_x_z_cpu!(ws::HPRLP_workspace_cpu, fact1::Float64, fact2::Float64)
+function update_x_z_normal_gpu!(ws::HPRLP_workspace_gpu)
+    CUDA.CUSPARSE.cusparseSpMV(ws.spmv_AT.handle, ws.spmv_AT.operator, ws.spmv_AT.alpha, ws.spmv_AT.desc_AT, ws.spmv_AT.desc_y, ws.spmv_AT.beta, ws.spmv_AT.desc_ATy,
+        ws.spmv_AT.compute_type, ws.spmv_AT.alg, ws.spmv_AT.buf)
+    @cuda threads = 256 blocks = ceil(Int, ws.n / 256) update_x_z_normal_kernel!(ws.x, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, ws.Halpern_params, ws.n)
+end
+
+function update_x_z_check_cpu!(ws::HPRLP_workspace_cpu, fact1::Float64, fact2::Float64)
     mul!(ws.ATy, ws.AT, ws.y)
     x = ws.x
     x_bar = ws.x_bar
@@ -146,30 +150,42 @@ function update_x_z_cpu!(ws::HPRLP_workspace_cpu, fact1::Float64, fact2::Float64
     ATy = ws.ATy
     c = ws.c
     dx = ws.dx
-    if ws.to_check
-        @simd for i in eachindex(x)
-            @inbounds begin
-               z_bar[i] = x[i] + sigma * (ATy[i] - c[i])
-               x_bar[i] = z_bar[i] < l[i] ? l[i] : (z_bar[i] > u[i] ? u[i] : z_bar[i])
-               x_hat[i] = 2 * x_bar[i] - x[i]
-               dx[i] = x_bar[i] - x_hat[i]
-               x[i] = fact1 * x0[i] + fact2 * x_hat[i]
-               z_bar[i] = (x_bar[i] - z_bar[i]) / sigma 
-            end
-        end
-    else
-        @simd for i in eachindex(x)
-            @inbounds begin
-               x_bar[i] = x[i] + sigma * (ATy[i] - c[i])
-               x_bar[i] = x_bar[i] < l[i] ? l[i] : (x_bar[i] > u[i] ? u[i] : x_bar[i])
-               x_hat[i] = 2 * x_bar[i] - x[i]
-               x[i] = fact1 * x0[i] + fact2 * x_hat[i]
-            end
+    @simd for i in eachindex(x)
+        @inbounds begin
+            z_bar[i] = x[i] + sigma * (ATy[i] - c[i])
+            x_bar[i] = z_bar[i] < l[i] ? l[i] : (z_bar[i] > u[i] ? u[i] : z_bar[i])
+            x_hat[i] = 2 * x_bar[i] - x[i]
+            dx[i] = x_bar[i] - x_hat[i]
+            x[i] = fact1 * x0[i] + fact2 * x_hat[i]
+            z_bar[i] = (x_bar[i] - z_bar[i]) / sigma
         end
     end
 end
 
-function update_y_kernel_1!(dy::CuDeviceVector{Float64},
+function update_x_z_normal_cpu!(ws::HPRLP_workspace_cpu, fact1::Float64, fact2::Float64)
+    mul!(ws.ATy, ws.AT, ws.y)
+    x = ws.x
+    x_bar = ws.x_bar
+    z_bar = ws.z_bar
+    x_hat = ws.x_hat
+    x0 = ws.last_x
+    l = ws.l
+    u = ws.u
+    sigma = ws.sigma
+    ATy = ws.ATy
+    c = ws.c
+    dx = ws.dx
+    @simd for i in eachindex(x)
+        @inbounds begin
+            x_bar[i] = x[i] + sigma * (ATy[i] - c[i])
+            x_bar[i] = x_bar[i] < l[i] ? l[i] : (x_bar[i] > u[i] ? u[i] : x_bar[i])
+            x_hat[i] = 2 * x_bar[i] - x[i]
+            x[i] = fact1 * x0[i] + fact2 * x_hat[i]
+        end
+    end
+end
+
+function update_y_check_kernel!(dy::CuDeviceVector{Float64},
     y_bar::CuDeviceVector{Float64},
     y::CuDeviceVector{Float64},
     y_obj::CuDeviceVector{Float64},
@@ -179,12 +195,14 @@ function update_y_kernel_1!(dy::CuDeviceVector{Float64},
     fact1::Float64,
     fact2::Float64,
     y0::CuDeviceVector{Float64},
-    Halpern_fact1::Float64,
-    Halpern_fact2::Float64,
+    Halpern_params::CuDeviceVector{Float64,1},
     m::Int)
 
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= m
+        Halpern_fact1 = Halpern_params[1]
+        Halpern_fact2 = Halpern_params[2]
+
         @inbounds begin
             yi = y[i]
             ai = Ax[i]
@@ -206,7 +224,7 @@ function update_y_kernel_1!(dy::CuDeviceVector{Float64},
     return
 end
 
-function update_y_kernel_2!(
+function update_y_normal_kernel!(
     y::CuDeviceVector{Float64},
     AL::CuDeviceVector{Float64},
     AU::CuDeviceVector{Float64},
@@ -214,12 +232,14 @@ function update_y_kernel_2!(
     fact1::Float64,
     fact2::Float64,
     y0::CuDeviceVector{Float64},
-    Halpern_fact1::Float64,
-    Halpern_fact2::Float64,
+    Halpern_params::CuDeviceVector{Float64,1},
     m::Int)
 
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= m
+        Halpern_fact1 = Halpern_params[1]
+        Halpern_fact2 = Halpern_params[2]
+
         @inbounds begin
             yi = y[i]
             ai = Ax[i]
@@ -238,19 +258,23 @@ function update_y_kernel_2!(
     return
 end
 
-function update_y_gpu!(ws::HPRLP_workspace_gpu, Halpern_fact1::Float64, Halpern_fact2::Float64)
+function update_y_check_gpu!(ws::HPRLP_workspace_gpu)
     CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha, ws.spmv_A.desc_A, ws.spmv_A.desc_x_hat, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
         ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
     fact1 = ws.lambda_max * ws.sigma
     fact2 = 1.0 / fact1
-    if ws.to_check
-        @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_kernel_1!(ws.dy, ws.y_bar, ws.y, ws.y_obj, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, Halpern_fact1, Halpern_fact2, ws.m)
-    else
-        @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_kernel_2!(ws.y,ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, Halpern_fact1, Halpern_fact2, ws.m)
-    end
+    @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_check_kernel!(ws.dy, ws.y_bar, ws.y, ws.y_obj, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, ws.Halpern_params, ws.m)
 end
 
-function update_y_cpu!(ws::HPRLP_workspace_cpu, Halpern_fact1::Float64, Halpern_fact2::Float64)
+function update_y_normal_gpu!(ws::HPRLP_workspace_gpu)
+    CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha, ws.spmv_A.desc_A, ws.spmv_A.desc_x_hat, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
+        ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
+    fact1 = ws.lambda_max * ws.sigma
+    fact2 = 1.0 / fact1
+    @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_normal_kernel!(ws.y, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, ws.Halpern_params, ws.m)
+end
+
+function update_y_check_cpu!(ws::HPRLP_workspace_cpu, Halpern_fact1::Float64, Halpern_fact2::Float64)
     mul!(ws.Ax, ws.A, ws.x_hat)
     fact1 = ws.lambda_max * ws.sigma
     fact2 = 1.0 / fact1
@@ -279,6 +303,36 @@ function update_y_cpu!(ws::HPRLP_workspace_cpu, Halpern_fact1::Float64, Halpern_
             dy[i] = yb - y_hat[i]
             # Halpern update
             y[i] = Halpern_fact1 * y0[i] + Halpern_fact2 * y_hat[i]
+        end
+    end
+    return
+end
+
+function update_y_normal_cpu!(ws::HPRLP_workspace_cpu, Halpern_fact1::Float64, Halpern_fact2::Float64)
+    mul!(ws.Ax, ws.A, ws.x_hat)
+    fact1 = ws.lambda_max * ws.sigma
+    fact2 = 1.0 / fact1
+    y = ws.y
+    y_obj = ws.y_obj
+    AL = ws.AL
+    AU = ws.AU
+    y0 = ws.last_y
+    y_bar = ws.y_bar
+    y_hat = ws.y_hat
+    Ax = ws.Ax
+    dy = ws.dy
+    @simd for i in eachindex(y)
+        @inbounds begin
+            yi = y[i]
+            # scaled residual
+            v = Ax[i] - fact1 * yi
+            d = max(AL[i] - v, min(AU[i] - v, 0.0))
+            # for computing the dual obj function value
+            y_obj[i] = v + d
+            # scaled update
+            yb = fact2 * d
+            # Halpern update
+            y[i] = Halpern_fact1 * y0[i] + Halpern_fact2 * (2 * yb - yi)
         end
     end
     return
@@ -354,7 +408,6 @@ end
     return
 end
 
-
 function compute_err_Rp_gpu!(ws::HPRLP_workspace_gpu, sc::Scaling_info_gpu)
     CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha, ws.spmv_A.desc_A, ws.spmv_A.desc_x_bar, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
         ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
@@ -387,15 +440,15 @@ end
 # GPU kernels for scaling operations
 
 # Kernel to compute row-wise maximum of absolute values for CSR matrix
-function compute_row_max_abs_kernel!(rowPtr::CuDeviceVector{Int32}, 
-                                      nzVal::CuDeviceVector{Float64},
-                                      row_norm::CuDeviceVector{Float64},
-                                      m::Int)
+function compute_row_max_abs_kernel!(rowPtr::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    row_norm::CuDeviceVector{Float64},
+    m::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= m
         @inbounds begin
             start_idx = rowPtr[i]
-            end_idx = rowPtr[i + 1] - 1
+            end_idx = rowPtr[i+1] - 1
             max_val = 0.0
             for k in start_idx:end_idx
                 val = abs(nzVal[k])
@@ -408,15 +461,15 @@ function compute_row_max_abs_kernel!(rowPtr::CuDeviceVector{Int32},
 end
 
 # Kernel to compute column-wise maximum of absolute values for CSR matrix (operates on AT in CSR format)
-function compute_col_max_abs_kernel!(rowPtr::CuDeviceVector{Int32}, 
-                                      nzVal::CuDeviceVector{Float64},
-                                      col_norm::CuDeviceVector{Float64},
-                                      n::Int)
+function compute_col_max_abs_kernel!(rowPtr::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    col_norm::CuDeviceVector{Float64},
+    n::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
         @inbounds begin
             start_idx = rowPtr[i]
-            end_idx = rowPtr[i + 1] - 1
+            end_idx = rowPtr[i+1] - 1
             max_val = 0.0
             for k in start_idx:end_idx
                 val = abs(nzVal[k])
@@ -429,15 +482,15 @@ function compute_col_max_abs_kernel!(rowPtr::CuDeviceVector{Int32},
 end
 
 # Kernel to compute row-wise sum of absolute values for CSR matrix
-function compute_row_sum_abs_kernel!(rowPtr::CuDeviceVector{Int32}, 
-                                      nzVal::CuDeviceVector{Float64},
-                                      row_norm::CuDeviceVector{Float64},
-                                      m::Int)
+function compute_row_sum_abs_kernel!(rowPtr::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    row_norm::CuDeviceVector{Float64},
+    m::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= m
         @inbounds begin
             start_idx = rowPtr[i]
-            end_idx = rowPtr[i + 1] - 1
+            end_idx = rowPtr[i+1] - 1
             sum_val = 0.0
             for k in start_idx:end_idx
                 sum_val += abs(nzVal[k])
@@ -449,15 +502,15 @@ function compute_row_sum_abs_kernel!(rowPtr::CuDeviceVector{Int32},
 end
 
 # Kernel to compute column-wise sum of absolute values for CSR matrix (operates on AT in CSR format)
-function compute_col_sum_abs_kernel!(rowPtr::CuDeviceVector{Int32}, 
-                                      nzVal::CuDeviceVector{Float64},
-                                      col_norm::CuDeviceVector{Float64},
-                                      n::Int)
+function compute_col_sum_abs_kernel!(rowPtr::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    col_norm::CuDeviceVector{Float64},
+    n::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
         @inbounds begin
             start_idx = rowPtr[i]
-            end_idx = rowPtr[i + 1] - 1
+            end_idx = rowPtr[i+1] - 1
             sum_val = 0.0
             for k in start_idx:end_idx
                 sum_val += abs(nzVal[k])
@@ -469,16 +522,16 @@ function compute_col_sum_abs_kernel!(rowPtr::CuDeviceVector{Int32},
 end
 
 # Kernel to scale rows of CSR matrix by 1.0 / row_scale
-function scale_rows_csr_kernel!(rowPtr::CuDeviceVector{Int32}, 
-                                 nzVal::CuDeviceVector{Float64},
-                                 row_scale::CuDeviceVector{Float64},
-                                 m::Int)
+function scale_rows_csr_kernel!(rowPtr::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    row_scale::CuDeviceVector{Float64},
+    m::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= m
         @inbounds begin
             scale = 1.0 / row_scale[i]
             start_idx = rowPtr[i]
-            end_idx = rowPtr[i + 1] - 1
+            end_idx = rowPtr[i+1] - 1
             for k in start_idx:end_idx
                 nzVal[k] *= scale
             end
@@ -488,16 +541,16 @@ function scale_rows_csr_kernel!(rowPtr::CuDeviceVector{Int32},
 end
 
 # Kernel to scale columns of CSR matrix (this operates on AT stored in CSR, so scaling rows of AT = scaling columns of A)
-function scale_cols_via_AT_csr_kernel!(rowPtr::CuDeviceVector{Int32}, 
-                                        nzVal::CuDeviceVector{Float64},
-                                        col_scale::CuDeviceVector{Float64},
-                                        n::Int)
+function scale_cols_via_AT_csr_kernel!(rowPtr::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    col_scale::CuDeviceVector{Float64},
+    n::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
         @inbounds begin
             scale = 1.0 / col_scale[i]
             start_idx = rowPtr[i]
-            end_idx = rowPtr[i + 1] - 1
+            end_idx = rowPtr[i+1] - 1
             for k in start_idx:end_idx
                 nzVal[k] *= scale
             end
@@ -508,15 +561,15 @@ end
 
 # Kernel to scale columns of CSR matrix by column indices
 function scale_csr_cols_kernel!(rowPtr::CuDeviceVector{Int32},
-                                 colVal::CuDeviceVector{Int32},
-                                 nzVal::CuDeviceVector{Float64},
-                                 col_scale::CuDeviceVector{Float64},
-                                 m::Int)
+    colVal::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    col_scale::CuDeviceVector{Float64},
+    m::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= m
         @inbounds begin
             start_idx = rowPtr[i]
-            end_idx = rowPtr[i + 1] - 1
+            end_idx = rowPtr[i+1] - 1
             for k in start_idx:end_idx
                 col_idx = colVal[k]
                 nzVal[k] /= col_scale[col_idx]
@@ -527,9 +580,9 @@ function scale_csr_cols_kernel!(rowPtr::CuDeviceVector{Int32},
 end
 
 # Kernel to scale a vector by another vector element-wise (v[i] /= scale[i])
-function scale_vector_div_kernel!(v::CuDeviceVector{Float64}, 
-                                   scale::CuDeviceVector{Float64},
-                                   n::Int)
+function scale_vector_div_kernel!(v::CuDeviceVector{Float64},
+    scale::CuDeviceVector{Float64},
+    n::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
         @inbounds v[i] /= scale[i]
@@ -538,9 +591,9 @@ function scale_vector_div_kernel!(v::CuDeviceVector{Float64},
 end
 
 # Kernel to scale a vector by another vector element-wise (v[i] *= scale[i])
-function scale_vector_mul_kernel!(v::CuDeviceVector{Float64}, 
-                                   scale::CuDeviceVector{Float64},
-                                   n::Int)
+function scale_vector_mul_kernel!(v::CuDeviceVector{Float64},
+    scale::CuDeviceVector{Float64},
+    n::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
         @inbounds v[i] *= scale[i]
@@ -549,9 +602,9 @@ function scale_vector_mul_kernel!(v::CuDeviceVector{Float64},
 end
 
 # Kernel to scale a vector by a scalar (v[i] /= scalar)
-function scale_vector_scalar_div_kernel!(v::CuDeviceVector{Float64}, 
-                                          scalar::Float64,
-                                          n::Int)
+function scale_vector_scalar_div_kernel!(v::CuDeviceVector{Float64},
+    scalar::Float64,
+    n::Int)
     i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
     if i <= n
         @inbounds v[i] /= scalar

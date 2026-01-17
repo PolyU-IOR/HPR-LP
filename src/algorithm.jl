@@ -550,6 +550,8 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     # Initialize backup flag
     ws.backup_created = false
 
+    ws.Halpern_params = CUDA.zeros(Float64, 2)
+
     return ws
 end
 
@@ -757,7 +759,7 @@ function setup_gpu_model(model::LP_info_cpu, params::HPRLP_parameters)
     if params.verbose
         println("COPY TO GPU ...")
     end
-    
+
     model_gpu = LP_info_gpu(
         CuSparseMatrixCSR(model.A),
         CuSparseMatrixCSR(model.AT),
@@ -769,18 +771,18 @@ function setup_gpu_model(model::LP_info_cpu, params::HPRLP_parameters)
         model.obj_constant,
     )
     CUDA.synchronize()
-    
+
     if params.verbose
         println(@sprintf("COPY TO GPU time: %.2f seconds", time() - t_start))
     end
-    
+
     return model_gpu
 end
 
 # Helper function to apply scaling (CPU or GPU)
 function setup_scaling(lp::Union{LP_info_cpu, LP_info_gpu}, params::HPRLP_parameters)
     t_start = time()
-    
+
     if params.use_gpu
         if params.verbose
             println("SCALING LP ON GPU ...")
@@ -799,22 +801,22 @@ function setup_scaling(lp::Union{LP_info_cpu, LP_info_gpu}, params::HPRLP_parame
             println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
         end
     end
-    
+
     return scaling_info
 end
 
 # Helper function to print solver parameters
 function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu, LP_info_gpu})
     m, n = size(lp.A)
-    
+
     # Count constraint types
     AL = lp.AL isa CuArray ? Vector(lp.AL) : lp.AL
     AU = lp.AU isa CuArray ? Vector(lp.AU) : lp.AU
-    
+
     num_equalities = count(AL .== AU)
     num_inequalities = m - num_equalities
     nnz_A = nnz(lp.A isa CuSparseMatrixCSR ? SparseMatrixCSC(lp.A) : lp.A)
-    
+
     println("="^80)
     println("PROBLEM INFORMATION:")
     println("  Rows (constraints): m = ", m)
@@ -834,7 +836,7 @@ function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu
     println("    Ruiz scaling: ", params.use_Ruiz_scaling ? "Enabled" : "Disabled")
     println("    Pock-Chambolle scaling: ", params.use_Pock_Chambolle_scaling ? "Enabled" : "Disabled")
     println("    b/c scaling: ", params.use_bc_scaling ? "Enabled" : "Disabled")
-    
+
     if params.warm_up
         println("  Warm-up: Enabled (avoids JIT compilation overhead)")
     else
@@ -842,20 +844,20 @@ function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu
         println("    ⚠ WARNING: First run of each function may be slower due to JIT compilation.")
         println("    ⚠ Consider enabling warm_up for more accurate timing measurements.")
     end
-    
+
     if params.initial_x !== nothing
         println("  Initial x: Provided (length ", length(params.initial_x), ")")
     end
     if params.initial_y !== nothing
         println("  Initial y: Provided (length ", length(params.initial_y), ")")
     end
-    
+
     if params.auto_save
         # Calculate estimated memory for auto_save
         memory_bytes = (n + m) * 16  # 8 bytes per Float64
         memory_mb = memory_bytes / (1024 * 1024)
         memory_gb = memory_bytes / (1024 * 1024 * 1024)
-        
+
         println("  Auto-save: ENABLED")
         println("    ⚠ WARNING: Auto-save will write to disk at each print iteration.")
         println("    ⚠ This may consume significant I/O bandwidth and slightly reduce speed.")
@@ -882,8 +884,10 @@ function setup_solver_functions(use_gpu::Bool)
             compute_residuals_gpu!,
             update_sigma_gpu!,
             collect_results_gpu!,
-            update_x_z_gpu!,
-            update_y_gpu!,
+            update_x_z_check_gpu!,
+            update_x_z_normal_gpu!,
+            update_y_check_gpu!,
+            update_y_normal_gpu!,
             compute_weighted_norm_gpu!
         )
     else
@@ -891,8 +895,10 @@ function setup_solver_functions(use_gpu::Bool)
             compute_residuals_cpu!,
             update_sigma_cpu!,
             collect_results_cpu!,
-            update_x_z_cpu!,
-            update_y_cpu!,
+            update_x_z_check_cpu!,
+            update_x_z_normal_cpu!,
+            update_y_check_cpu!,
+            update_y_normal_cpu!,
             compute_weighted_norm_cpu!
         )
     end
@@ -1011,27 +1017,27 @@ function optimize(model::LP_info_cpu, params::HPRLP_parameters)
             println("="^80)
         end
         t_start_warmup = time()
-        
+
         # Save original max_iter and verbose
         original_max_iter = params.max_iter
         original_verbose = params.verbose
         params.max_iter = 200
         params.verbose = false
-        
+
         # Create a copy of the model for warmup
         warmup_model = LP_info_cpu(
-            copy(model.A), copy(model.AT), copy(model.c), 
-            copy(model.AL), copy(model.AU), copy(model.l), copy(model.u), 
+            copy(model.A), copy(model.AT), copy(model.c),
+            copy(model.AL), copy(model.AU), copy(model.l), copy(model.u),
             model.obj_constant
         )
-        
+
         # Run warmup solve
         solve(warmup_model, params)
-        
+
         # Restore original parameters
         params.max_iter = original_max_iter
         params.verbose = original_verbose
-        
+
         warmup_time = time() - t_start_warmup
         if params.verbose
             println(@sprintf("Warmup time: %.2f seconds", warmup_time))
@@ -1039,25 +1045,25 @@ function optimize(model::LP_info_cpu, params::HPRLP_parameters)
             println()
         end
     end
-    
+
     # Main solve
     if params.verbose
         println("="^80)
         println("MAIN SOLVE")
         println("="^80)
     end
-    
+
     setup_start = time()
     results = solve(model, params)
     setup_time = time() - setup_start - results.time
-    
+
     if params.verbose
         println(@sprintf("Total time: %.2fs", setup_time + results.time),
             @sprintf("  setup time = %.2fs", setup_time),
             @sprintf("  solve time = %.2fs", results.time))
         println("="^80)
     end
-    
+
     return results
 end
 
@@ -1095,7 +1101,7 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
     if params.use_gpu
         validate_gpu_parameters!(params)
     end
-    
+
     # Setup: GPU transfer and scaling
     if params.use_gpu
         lp = setup_gpu_model(model, params)
@@ -1104,7 +1110,7 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         scaling_info = setup_scaling(model, params)
         lp = model
     end
-    
+
     # Main optimization algorithm
     if params.verbose
         println("HPR-LP version v0.1.4")
@@ -1152,8 +1158,10 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
     tolerance_reached = falses(length(tolerance_levels))
 
     # Select GPU or CPU function implementations
-    compute_residuals!, update_sigma!, collect_results!, update_x_z!, update_y!, compute_weighted_norm! = 
+    compute_residuals!, update_sigma!, collect_results!, update_x_z_check!, update_x_z_normal!, update_y_check!, update_y_normal!, compute_weighted_norm! =
         setup_solver_functions(params.use_gpu)
+
+    graph_exec = nothing
 
     # Main iteration loop
     for iter = 0:params.max_iter
@@ -1190,7 +1198,7 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         end
 
         # Check and record tolerance thresholds
-        check_and_record_tolerance!(residuals, iter, t_start_alg, tolerance_levels, 
+        check_and_record_tolerance!(residuals, iter, t_start_alg, tolerance_levels,
             tolerance_times, tolerance_iters, tolerance_reached, params.verbose)
 
         # Collect results and return if terminated
@@ -1220,6 +1228,15 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         # Restart if needed
         do_restart!(restart_info, ws)
 
+        # Rebuild Graph if restarted
+        if params.use_gpu && (iter == 0 || restart_info.restart_flag > 0)
+            graph = CUDA.capture() do
+                update_x_z_normal_gpu!(ws)
+                update_y_normal_gpu!(ws)
+            end
+            graph_exec = CUDA.instantiate(graph)
+        end
+
         # Determine whether to compute bar points for residuals
         ws.to_check = (rem(iter + 1, params.check_iter) == 0) || (restart_info.restart_flag > 0)
         if params.print_frequency == -1
@@ -1227,12 +1244,26 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         elseif params.print_frequency > 0
             ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
         end
+        current_fact1 = 1.0 / (restart_info.inner + 2.0)
+        current_fact2 = 1.0 - current_fact1
+        if params.use_gpu
+            copyto!(ws.Halpern_params, [current_fact1, current_fact2])
 
-        # Update x, y, and z
-        fact1 = 1.0 / (restart_info.inner + 2.0)
-        fact2 = 1.0 - fact1
-        update_x_z!(ws, fact1, fact2)
-        update_y!(ws, fact1, fact2)
+            if ws.to_check
+                update_x_z_check_gpu!(ws)
+                update_y_check_gpu!(ws)
+            else
+                CUDA.launch(graph_exec)
+            end
+        else
+            if ws.to_check
+                update_x_z_check!(ws, current_fact1, current_fact2)
+                update_y_check!(ws, current_fact1, current_fact2)
+            else
+                update_x_z_normal!(ws, current_fact1, current_fact2)
+                update_y_normal!(ws, current_fact1, current_fact2)
+            end
+        end
         restart_info.inner += 1
 
         # Compute weighted norm

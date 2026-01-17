@@ -122,11 +122,11 @@ end
 function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_scaling::Bool, use_bc_scaling::Bool)
     m = size(lp.A, 1)
     n = size(lp.A, 2)
-    
+
     # Initialize scaling vectors on GPU
     row_norm = CUDA.ones(Float64, m)
     col_norm = CUDA.ones(Float64, n)
-    
+
     # Compute original norms for scaling info
     AL_nInf = copy(lp.AL)
     AU_nInf = copy(lp.AU)
@@ -134,15 +134,15 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
     AU_nInf[lp.AU.==Inf] .= 0.0
     norm_b_org = 1 + CUDA.norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
     norm_c_org = 1 + CUDA.norm(lp.c)
-    
+
     # Initialize scaling info
     scaling_info = Scaling_info_gpu(
-        copy(lp.l), copy(lp.u), 
-        row_norm, col_norm, 
-        1.0, 1.0, 1.0, 1.0, 
+        copy(lp.l), copy(lp.u),
+        row_norm, col_norm,
+        1.0, 1.0, 1.0, 1.0,
         norm_b_org, norm_c_org
     )
-    
+
     # Get CSR matrix components
     A_rowPtr = lp.A.rowPtr
     A_colVal = lp.A.colVal
@@ -150,137 +150,137 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
     AT_rowPtr = lp.AT.rowPtr
     AT_colVal = lp.AT.colVal
     AT_nzVal = lp.AT.nzVal
-    
+
     # Temporary vectors for scaling
     temp_row_norm = CUDA.ones(Float64, m)
     temp_col_norm = CUDA.ones(Float64, n)
-    
+
     # Ruiz scaling
     if use_Ruiz_scaling
         for _ in 1:10
             # Compute row-wise max of |A|
-            @cuda threads=256 blocks=ceil(Int, m/256) compute_row_max_abs_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, m / 256) compute_row_max_abs_kernel!(
                 A_rowPtr, A_nzVal, temp_row_norm, m
             )
             CUDA.synchronize()
-            
+
             # Compute column-wise max of |A| (via AT)
-            @cuda threads=256 blocks=ceil(Int, n/256) compute_col_max_abs_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, n / 256) compute_col_max_abs_kernel!(
                 AT_rowPtr, AT_nzVal, temp_col_norm, n
             )
             CUDA.synchronize()
-            
+
             # Update cumulative norms
             row_norm .*= temp_row_norm
             col_norm .*= temp_col_norm
-            
+
             # Scale A: A = DA * A * EA (rows by temp_row_norm, cols by temp_col_norm)
-            @cuda threads=256 blocks=ceil(Int, m/256) scale_rows_csr_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, m / 256) scale_rows_csr_kernel!(
                 A_rowPtr, A_nzVal, temp_row_norm, m
             )
             CUDA.synchronize()
-            
-            @cuda threads=256 blocks=ceil(Int, m/256) scale_csr_cols_kernel!(
+
+            @cuda threads = 256 blocks = ceil(Int, m / 256) scale_csr_cols_kernel!(
                 A_rowPtr, A_colVal, A_nzVal, temp_col_norm, m
             )
             CUDA.synchronize()
-            
+
             # Scale AT: AT = EA * AT * DA (rows by temp_col_norm, cols by temp_row_norm)
-            @cuda threads=256 blocks=ceil(Int, n/256) scale_rows_csr_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, n / 256) scale_rows_csr_kernel!(
                 AT_rowPtr, AT_nzVal, temp_col_norm, n
             )
             CUDA.synchronize()
-            
-            @cuda threads=256 blocks=ceil(Int, n/256) scale_csr_cols_kernel!(
+
+            @cuda threads = 256 blocks = ceil(Int, n / 256) scale_csr_cols_kernel!(
                 AT_rowPtr, AT_colVal, AT_nzVal, temp_row_norm, n
             )
             CUDA.synchronize()
-            
+
             # Scale constraint bounds
-            @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_div_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, m / 256) scale_vector_div_kernel!(
                 lp.AL, temp_row_norm, m
             )
-            @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_div_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, m / 256) scale_vector_div_kernel!(
                 lp.AU, temp_row_norm, m
             )
             CUDA.synchronize()
-            
+
             # Scale objective and variable bounds
-            @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_div_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_div_kernel!(
                 lp.c, temp_col_norm, n
             )
-            @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_mul_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_mul_kernel!(
                 lp.l, temp_col_norm, n
             )
-            @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_mul_kernel!(
+            @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_mul_kernel!(
                 lp.u, temp_col_norm, n
             )
             CUDA.synchronize()
         end
     end
-    
+
     # Pock-Chambolle scaling
     if use_Pock_Chambolle_scaling
         # Compute row-wise sum of |A|
-        @cuda threads=256 blocks=ceil(Int, m/256) compute_row_sum_abs_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, m / 256) compute_row_sum_abs_kernel!(
             A_rowPtr, A_nzVal, temp_row_norm, m
         )
         CUDA.synchronize()
-        
+
         # Compute column-wise sum of |A| (via AT)
-        @cuda threads=256 blocks=ceil(Int, n/256) compute_col_sum_abs_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, n / 256) compute_col_sum_abs_kernel!(
             AT_rowPtr, AT_nzVal, temp_col_norm, n
         )
         CUDA.synchronize()
-        
+
         # Update cumulative norms
         row_norm .*= temp_row_norm
         col_norm .*= temp_col_norm
-        
+
         # Scale A: A = DA * A * EA (rows by temp_row_norm, cols by temp_col_norm)
-        @cuda threads=256 blocks=ceil(Int, m/256) scale_rows_csr_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, m / 256) scale_rows_csr_kernel!(
             A_rowPtr, A_nzVal, temp_row_norm, m
         )
         CUDA.synchronize()
-        
-        @cuda threads=256 blocks=ceil(Int, m/256) scale_csr_cols_kernel!(
+
+        @cuda threads = 256 blocks = ceil(Int, m / 256) scale_csr_cols_kernel!(
             A_rowPtr, A_colVal, A_nzVal, temp_col_norm, m
         )
         CUDA.synchronize()
-        
+
         # Scale AT: AT = EA * AT * DA (rows by temp_col_norm, cols by temp_row_norm)
-        @cuda threads=256 blocks=ceil(Int, n/256) scale_rows_csr_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, n / 256) scale_rows_csr_kernel!(
             AT_rowPtr, AT_nzVal, temp_col_norm, n
         )
         CUDA.synchronize()
-        
-        @cuda threads=256 blocks=ceil(Int, n/256) scale_csr_cols_kernel!(
+
+        @cuda threads = 256 blocks = ceil(Int, n / 256) scale_csr_cols_kernel!(
             AT_rowPtr, AT_colVal, AT_nzVal, temp_row_norm, n
         )
         CUDA.synchronize()
-        
+
         # Scale constraint bounds
-        @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_div_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, m / 256) scale_vector_div_kernel!(
             lp.AL, temp_row_norm, m
         )
-        @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_div_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, m / 256) scale_vector_div_kernel!(
             lp.AU, temp_row_norm, m
         )
         CUDA.synchronize()
-        
+
         # Scale objective and variable bounds
-        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_div_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_div_kernel!(
             lp.c, temp_col_norm, n
         )
-        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_mul_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_mul_kernel!(
             lp.l, temp_col_norm, n
         )
-        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_mul_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_mul_kernel!(
             lp.u, temp_col_norm, n
         )
         CUDA.synchronize()
     end
-    
+
     # b and c scaling
     if use_bc_scaling
         AL_nInf = copy(lp.AL)
@@ -289,31 +289,31 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
         AU_nInf[lp.AU.==Inf] .= 0.0
         b_scale = 1 + CUDA.norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
         c_scale = 1 + CUDA.norm(lp.c)
-        
-        @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_scalar_div_kernel!(
+
+        @cuda threads = 256 blocks = ceil(Int, m / 256) scale_vector_scalar_div_kernel!(
             lp.AL, b_scale, m
         )
-        @cuda threads=256 blocks=ceil(Int, m/256) scale_vector_scalar_div_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, m / 256) scale_vector_scalar_div_kernel!(
             lp.AU, b_scale, m
         )
-        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_scalar_div_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_scalar_div_kernel!(
             lp.c, c_scale, n
         )
-        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_scalar_div_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_scalar_div_kernel!(
             lp.l, b_scale, n
         )
-        @cuda threads=256 blocks=ceil(Int, n/256) scale_vector_scalar_div_kernel!(
+        @cuda threads = 256 blocks = ceil(Int, n / 256) scale_vector_scalar_div_kernel!(
             lp.u, b_scale, n
         )
         CUDA.synchronize()
-        
+
         scaling_info.b_scale = b_scale
         scaling_info.c_scale = c_scale
     else
         scaling_info.b_scale = 1.0
         scaling_info.c_scale = 1.0
     end
-    
+
     # Compute final norms
     AL_nInf = copy(lp.AL)
     AU_nInf = copy(lp.AU)
@@ -321,11 +321,11 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
     AU_nInf[lp.AU.==Inf] .= 0.0
     scaling_info.norm_b = CUDA.norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
     scaling_info.norm_c = CUDA.norm(lp.c)
-    
+
     # Store the cumulative scaling norms
     scaling_info.row_norm = row_norm
     scaling_info.col_norm = col_norm
-    
+
     return scaling_info
 end
 
@@ -375,10 +375,9 @@ function power_iteration_gpu(
                 spmv_A.compute_type, spmv_A.alg, spmv_A.buf
             )
 
-            lambda_max = CUDA.dot(q, z)
-
             # --- KEEP YOUR STOPPING CRITERION EXACTLY ---
             if (i % check_every == 0)
+                lambda_max = CUDA.dot(q, z)
                 @. q = z - lambda_max * q
                 error = CUDA.norm(q)
                 if error < tolerance
@@ -440,7 +439,7 @@ function validate_gpu_parameters!(params::HPRLP_parameters)
             params.use_gpu = false
             return
         end
-        
+
         # Check if device_number is valid
         num_devices = length(CUDA.devices())
         if params.device_number < 0 || params.device_number >= num_devices
@@ -543,7 +542,7 @@ function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     l::Vector{Float64},
     u::Vector{Float64},
     obj_constant::Float64=0.0)
-    
+
     # Convert dense matrix to sparse if needed
     if A isa Matrix
         @warn "Dense matrix detected. Converting to sparse format. For better performance, please provide a SparseMatrixCSC."
@@ -551,7 +550,7 @@ function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     else
         A_sparse = A
     end
-    
+
     # Create copies to avoid modifying the input
     A_copy = copy(A_sparse)
     c_copy = copy(c)
@@ -559,10 +558,10 @@ function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     AU_copy = copy(AU)
     l_copy = copy(l)
     u_copy = copy(u)
-    
+
     # Build the LP model
     standard_lp = LP_info_cpu(A_copy, transpose(A_copy), c_copy, AL_copy, AU_copy, l_copy, u_copy, obj_constant)
-    
+
     return standard_lp
 end
 
@@ -626,11 +625,11 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                 println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
                 println("Solving: ----------------------------------------------------------------------------------------------------------")
                 t_start_all = time()
-                
+
                 # Build and solve the model
                 model = build_from_mps(FILE_NAME, verbose=params.verbose)
                 results = solve(model, params)
-                
+
                 all_time = time() - t_start_all
                 println("Solve complete ----------------------------------------------------------------------------------------------------------")
 
