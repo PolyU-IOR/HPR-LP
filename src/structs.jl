@@ -385,6 +385,8 @@ mutable struct HPRLP_workspace_gpu
     # [NEW] Store dynamic Halpern parameters [fact1, fact2] for CUDA Graph
     Halpern_params::CuVector{Float64}
 
+    inner::CuVector{Float64}
+
     # Default constructor
     HPRLP_workspace_gpu() = new()
 end
