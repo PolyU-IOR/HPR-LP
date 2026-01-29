@@ -1235,7 +1235,7 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         if params.use_gpu && (iter == 0 || restart_info.restart_flag > 0)
             copyto!(ws.inner, [0.0])
             graph1 = CUDA.capture() do
-                for _ in 1:params.check_iter - 2
+                for _ in 1:params.check_iter-2
                     update_x_z_normal_gpu!(ws)
                     update_y_normal_gpu!(ws)
                 end
@@ -1243,18 +1243,12 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
             graph_exec1 = CUDA.instantiate(graph1)
 
             graph2 = CUDA.capture() do
-                for _ in 1:params.check_iter - 1
+                for _ in 1:params.check_iter-1
                     update_x_z_normal_gpu!(ws)
                     update_y_normal_gpu!(ws)
                 end
             end
             graph_exec2 = CUDA.instantiate(graph2)
-
-            update_x_z_check_gpu!(ws)
-            update_y_check_gpu!(ws)
-            restart_info.last_gap = compute_weighted_norm!(ws)
-            CUDA.launch(graph_exec1)
-            iter += params.check_iter - 1
         end
 
         # Determine whether to compute bar points for residuals
@@ -1268,13 +1262,25 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
             # copyto!(ws.Halpern_params, [current_fact1, current_fact2])
 
             if ws.to_check
-                update_x_z_check_gpu!(ws)
-                update_y_check_gpu!(ws)
-                restart_info.current_gap = compute_weighted_norm!(ws)
-                iter += 1
+                if restart_info.restart_flag > 0
+                    update_x_z_check_gpu!(ws)
+                    update_y_check_gpu!(ws)
+                    if restart_info.restart_flag > 0
+                        restart_info.last_gap = compute_weighted_norm!(ws)
+                    end
+                    CUDA.launch(graph_exec1)
+                    iter += params.check_iter - 1
+                    restart_info.inner += params.check_iter - 1
+                else
+                    update_x_z_check_gpu!(ws)
+                    update_y_check_gpu!(ws)
+                    iter += 1
+                    restart_info.inner += 1    
+                end
             else
                 CUDA.launch(graph_exec2)
                 iter += params.check_iter - 1
+                restart_info.inner += params.check_iter - 1
             end
         else
             current_fact1 = 1.0 / (restart_info.inner + 2.0)
@@ -1282,7 +1288,7 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
             if ws.to_check
                 update_x_z_check!(ws, current_fact1, current_fact2)
                 update_y_check!(ws, current_fact1, current_fact2)
-                restart_info.current_gap = compute_weighted_norm!(ws)
+
             else
                 update_x_z_normal!(ws, current_fact1, current_fact2)
                 update_y_normal!(ws, current_fact1, current_fact2)
@@ -1292,9 +1298,9 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         end
 
         # Compute weighted norm
-        # if rem(iter, params.check_iter) == 0
-        #     restart_info.current_gap = compute_weighted_norm!(ws)
-        # end
+        if rem(iter, params.check_iter) == 0
+            restart_info.current_gap = compute_weighted_norm!(ws)
+        end
         if restart_info.restart_flag > 0 && !params.use_gpu
             restart_info.last_gap = compute_weighted_norm!(ws)
         end
