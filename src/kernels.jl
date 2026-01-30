@@ -55,6 +55,24 @@ function compute_y_obj_cpu!(y_obj::Vector{Float64}, y::Vector{Float64}, AL::Vect
     end
 end
 
+# Update Halpern parameters deterministically (exactly once per iteration).
+# This is intended to be captured as a node in a CUDA Graph.
+function update_Halpern_params_kernel!(inner::CuDeviceVector{Float64}, Halpern_params::CuDeviceVector{Float64})
+    if threadIdx().x == 1 && blockIdx().x == 1
+        @inbounds begin
+            fact1 = 1.0 / (inner[1] + 2.0)
+            Halpern_params[1] = fact1
+            Halpern_params[2] = 1.0 - fact1
+            inner[1] += 1.0
+        end
+    end
+    return
+end
+
+function update_Halpern_params_gpu!(ws::HPRLP_workspace_gpu)
+    @cuda threads = 1 blocks = 1 update_Halpern_params_kernel!(ws.inner, ws.Halpern_params)
+end
+
 function update_x_z_check_kernel!(dx::CuDeviceVector{Float64},
     x::CuDeviceVector{Float64},
     z_bar::CuDeviceVector{Float64},
@@ -66,15 +84,15 @@ function update_x_z_check_kernel!(dx::CuDeviceVector{Float64},
     ATy::CuDeviceVector{Float64},
     c::CuDeviceVector{Float64},
     x0::CuDeviceVector{Float64},
-    inner::CuDeviceVector{Float64},
+    Halpern_params::CuDeviceVector{Float64},
     n::Int)
 
     # Load Halpern parameters once per block
     sh = CUDA.@cuStaticSharedMem(Float64, 2)
     if threadIdx().x == 1
         @inbounds begin
-            sh[1] = 1.0 / (inner[1] + 2.0)
-            sh[2] = 1.0 - sh[1]
+            sh[1] = Halpern_params[1]
+            sh[2] = Halpern_params[2]
         end
     end
     sync_threads()
@@ -114,15 +132,15 @@ function update_x_z_normal_kernel!(
     ATy::CuDeviceVector{Float64},
     c::CuDeviceVector{Float64},
     x0::CuDeviceVector{Float64},
-    inner::CuDeviceVector{Float64},
+    Halpern_params::CuDeviceVector{Float64},
     n::Int)
 
     # Load Halpern parameters once per block
     sh = CUDA.@cuStaticSharedMem(Float64, 2)
     if threadIdx().x == 1
         @inbounds begin
-            sh[1] = 1.0 / (inner[1] + 2.0)
-            sh[2] = 1.0 - sh[1]
+            sh[1] = Halpern_params[1]
+            sh[2] = Halpern_params[2]
         end
     end
     sync_threads()
@@ -147,15 +165,17 @@ function update_x_z_normal_kernel!(
 end
 
 function update_x_z_check_gpu!(ws::HPRLP_workspace_gpu)
+    update_Halpern_params_gpu!(ws)
     CUDA.CUSPARSE.cusparseSpMV(ws.spmv_AT.handle, ws.spmv_AT.operator, ws.spmv_AT.alpha, ws.spmv_AT.desc_AT, ws.spmv_AT.desc_y, ws.spmv_AT.beta, ws.spmv_AT.desc_ATy,
         ws.spmv_AT.compute_type, ws.spmv_AT.alg, ws.spmv_AT.buf)
-    @cuda threads = 256 blocks = ceil(Int, ws.n / 256) update_x_z_check_kernel!(ws.dx, ws.x, ws.z_bar, ws.x_bar, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, ws.inner, ws.n)
+    @cuda threads = 256 blocks = ceil(Int, ws.n / 256) update_x_z_check_kernel!(ws.dx, ws.x, ws.z_bar, ws.x_bar, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, ws.Halpern_params, ws.n)
 end
 
 function update_x_z_normal_gpu!(ws::HPRLP_workspace_gpu)
+    update_Halpern_params_gpu!(ws)
     CUDA.CUSPARSE.cusparseSpMV(ws.spmv_AT.handle, ws.spmv_AT.operator, ws.spmv_AT.alpha, ws.spmv_AT.desc_AT, ws.spmv_AT.desc_y, ws.spmv_AT.beta, ws.spmv_AT.desc_ATy,
         ws.spmv_AT.compute_type, ws.spmv_AT.alg, ws.spmv_AT.buf)
-    @cuda threads = 256 blocks = ceil(Int, ws.n / 256) update_x_z_normal_kernel!(ws.x, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, ws.inner, ws.n)
+    @cuda threads = 256 blocks = ceil(Int, ws.n / 256) update_x_z_normal_kernel!(ws.x, ws.x_hat, ws.l, ws.u, ws.sigma, ws.ATy, ws.c, ws.last_x, ws.Halpern_params, ws.n)
 end
 
 function update_x_z_check_cpu!(ws::HPRLP_workspace_cpu, fact1::Float64, fact2::Float64)
@@ -216,16 +236,15 @@ function update_y_check_kernel!(dy::CuDeviceVector{Float64},
     fact1::Float64,
     fact2::Float64,
     y0::CuDeviceVector{Float64},
-    inner::CuDeviceVector{Float64},
+    Halpern_params::CuDeviceVector{Float64},
     m::Int)
 
     # Load Halpern parameters once per block
     sh = CUDA.@cuStaticSharedMem(Float64, 2)
     if threadIdx().x == 1
         @inbounds begin
-            sh[1] = 1.0 / (inner[1] + 2.0)
-            sh[2] = 1.0 - sh[1]
-            inner[1] += 1.0
+            sh[1] = Halpern_params[1]
+            sh[2] = Halpern_params[2]
         end
     end
     sync_threads()
@@ -264,16 +283,15 @@ function update_y_normal_kernel!(
     fact1::Float64,
     fact2::Float64,
     y0::CuDeviceVector{Float64},
-    inner::CuDeviceVector{Float64},
+    Halpern_params::CuDeviceVector{Float64},
     m::Int)
 
     # Load Halpern parameters once per block
     sh = CUDA.@cuStaticSharedMem(Float64, 2)
     if threadIdx().x == 1
         @inbounds begin
-            sh[1] = 1.0 / (inner[1] + 2.0)
-            sh[2] = 1.0 - sh[1]
-            inner[1] += 1.0
+            sh[1] = Halpern_params[1]
+            sh[2] = Halpern_params[2]
         end
     end
     sync_threads()
@@ -306,7 +324,7 @@ function update_y_check_gpu!(ws::HPRLP_workspace_gpu)
         ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
     fact1 = ws.lambda_max * ws.sigma
     fact2 = 1.0 / fact1
-    @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_check_kernel!(ws.dy, ws.y_bar, ws.y, ws.y_obj, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, ws.inner, ws.m)
+    @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_check_kernel!(ws.dy, ws.y_bar, ws.y, ws.y_obj, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, ws.Halpern_params, ws.m)
 end
 
 function update_y_normal_gpu!(ws::HPRLP_workspace_gpu)
@@ -314,7 +332,7 @@ function update_y_normal_gpu!(ws::HPRLP_workspace_gpu)
         ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
     fact1 = ws.lambda_max * ws.sigma
     fact2 = 1.0 / fact1
-    @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_normal_kernel!(ws.y, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, ws.inner, ws.m)
+    @cuda threads = 256 blocks = ceil(Int, ws.m / 256) update_y_normal_kernel!(ws.y, ws.AL, ws.AU, ws.Ax, fact1, fact2, ws.last_y, ws.Halpern_params, ws.m)
 end
 
 function update_y_check_cpu!(ws::HPRLP_workspace_cpu, Halpern_fact1::Float64, Halpern_fact2::Float64)
