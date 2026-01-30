@@ -378,6 +378,7 @@ function power_iteration_gpu(
             @. q = z - lambda_max * q
             error = CUDA.norm(q)
             if error < tolerance
+                copyto!(ws.y, ws.dy)
                 return lambda_max
             end
         end
@@ -385,9 +386,9 @@ function power_iteration_gpu(
 
     println("Power iteration did not converge within the specified tolerance.")
     println("The maximum iteration is ", max_iterations, " and the error is ", error)
-    return lambda_max
-    # Always restore ws.y
+    
     copyto!(ws.y, ws.dy)
+    return lambda_max
 end
 
 function power_iteration_cpu(A::SparseMatrixCSC, AT::SparseMatrixCSC,
