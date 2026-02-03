@@ -334,7 +334,6 @@ function power_iteration_gpu(
     max_iterations::Int=5000,
     tolerance::Float64=1e-4,
     check_every::Int=10;
-    seed::Int=1,
 )
     spmv_A = ws.spmv_A
     spmv_AT = ws.spmv_AT
@@ -349,68 +348,69 @@ function power_iteration_gpu(
     error = Inf
     lambda_max = 1.0
 
-    try
-        # GPU RNG init (avoid CPU->GPU transfer)
-        CUDA.seed!(seed)
-        CUDA.randn!(z)
-        @. z = z + 1e-8
+    # GPU RNG init (avoid CPU->GPU transfer)
+    CUDA.seed!(1)
+    CUDA.randn!(z)
+    @. z = z + 1e-8
 
-        for i in 1:max_iterations
-            # Normalize: q = z / ||z||  (1 reduction + 1 broadcast kernel)
-            z2 = CUDA.dot(z, z)
-            invn = inv(sqrt(z2 + eps(Float64)))
-            @. q = z * invn
+    for i in 1:max_iterations
+        # Normalize: q = z / ||z||  (1 reduction + 1 broadcast kernel)
+        z2 = CUDA.dot(z, z)
+        invn = inv(sqrt(z2 + eps(Float64)))
+        @. q = z * invn
 
-            # z = A * (A' * q)
-            CUDA.CUSPARSE.cusparseSpMV(
-                spmv_AT.handle, spmv_AT.operator,
-                spmv_AT.alpha, spmv_AT.desc_AT, spmv_AT.desc_y,
-                spmv_AT.beta, spmv_AT.desc_ATy,
-                spmv_AT.compute_type, spmv_AT.alg, spmv_AT.buf
-            )
-            CUDA.CUSPARSE.cusparseSpMV(
-                spmv_A.handle, spmv_A.operator,
-                spmv_A.alpha, spmv_A.desc_A, spmv_AT.desc_ATy,
-                spmv_A.beta, spmv_A.desc_Ax,
-                spmv_A.compute_type, spmv_A.alg, spmv_A.buf
-            )
+        # z = A * (A' * q)
+        CUDA.CUSPARSE.cusparseSpMV(
+            spmv_AT.handle, spmv_AT.operator,
+            spmv_AT.alpha, spmv_AT.desc_AT, spmv_AT.desc_y,
+            spmv_AT.beta, spmv_AT.desc_ATy,
+            spmv_AT.compute_type, spmv_AT.alg, spmv_AT.buf
+        )
+        CUDA.CUSPARSE.cusparseSpMV(
+            spmv_A.handle, spmv_A.operator,
+            spmv_A.alpha, spmv_A.desc_A, spmv_AT.desc_ATy,
+            spmv_A.beta, spmv_A.desc_Ax,
+            spmv_A.compute_type, spmv_A.alg, spmv_A.buf
+        )
 
-            # --- KEEP YOUR STOPPING CRITERION EXACTLY ---
-            if (i % check_every == 0)
-                lambda_max = CUDA.dot(q, z)
-                @. q = z - lambda_max * q
-                error = CUDA.norm(q)
-                if error < tolerance
-                    return lambda_max
-                end
+        if (i % check_every == 0)
+            lambda_max = CUDA.dot(q, z)
+            @. q = z - lambda_max * q
+            error = CUDA.norm(q)
+            if error < tolerance
+                copyto!(ws.y, ws.dy)
+                return lambda_max
             end
         end
-
-        println("Power iteration did not converge within the specified tolerance.")
-        println("The maximum iteration is ", max_iterations, " and the error is ", error)
-        return lambda_max
-    finally
-        # Always restore ws.y
-        copyto!(ws.y, ws.dy)
     end
+
+    println("Power iteration did not converge within the specified tolerance.")
+    println("The maximum iteration is ", max_iterations, " and the error is ", error)
+    
+    copyto!(ws.y, ws.dy)
+    return lambda_max
 end
 
 function power_iteration_cpu(A::SparseMatrixCSC, AT::SparseMatrixCSC,
-    max_iterations::Int=5000, tolerance::Float64=1e-4)
+    max_iterations::Int=5000, tolerance::Float64=1e-4, check_every::Int=10;)
     seed = 1
     m, n = size(A)
     z = Vector(randn(Random.MersenneTwister(seed), m)) .+ 1e-8 # Initial random vector
     q = zeros(Float64, m)
     ATq = zeros(Float64, n)
     for i in 1:max_iterations
-        q .= z
-        q ./= norm(q)
+        z2 = dot(z, z)
+        invn = inv(sqrt(z2 + eps(Float64)))
+        @. q = z * invn
         mul!(ATq, AT, q)
         mul!(z, A, ATq)
-        lambda_max = dot(q, z)
-        q .= z .- lambda_max .* q
-        if norm(q) < tolerance
-            return lambda_max
+        if (i % check_every == 0)
+            lambda_max = dot(q, z)
+            @. q = z - lambda_max * q
+            error = norm(q)
+            if error < tolerance
+                return lambda_max
+            end
         end
     end
     println("Power iteration did not converge within the specified tolerance.")
