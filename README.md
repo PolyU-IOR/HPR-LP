@@ -12,6 +12,27 @@
 
 ---
 
+## Available HPR-LP Implementations
+
+For the C implementation on GPUs (recommended for benchmarking), please visit the following repository:
+
+[https://github.com/PolyU-IOR/HPR-LP-C](https://github.com/PolyU-IOR/HPR-LP-C)
+
+For the Julia implementation on CPUs and GPUs (recommended for development/research), please visit the following repository:
+
+[https://github.com/PolyU-IOR/HPR-LP](https://github.com/PolyU-IOR/HPR-LP)
+
+For the Python implementation on GPUs, please visit the following repository:
+
+[https://github.com/PolyU-IOR/HPR-LP-Python](https://github.com/PolyU-IOR/HPR-LP-Python)
+
+For the MATLAB implementation on CPUs, please visit the following repository:  
+
+[https://github.com/PolyU-IOR/HPR-LP-MATLAB](https://github.com/PolyU-IOR/HPR-LP-MATLAB)
+
+---
+
+
 ## LP Problem Formulation
 
 <div align="center">
@@ -167,6 +188,10 @@ Below is a list of the parameters in HPR-LP along with their default values and 
     <tr><td><code>use_gpu</code></td><td><code>true</code></td><td>Whether to use GPU or not.</td></tr>
     <tr><td><code>print_frequency</code></td><td><code>-1</code> (auto)</td><td>Print the log every <code>print_frequency</code> iterations.</td></tr>
     <tr><td><code>verbose</code></td><td><code>true</code></td><td>Whether to print solver output. Set to <code>false</code> for silent mode.</td></tr>
+    <tr><td><code>initial_x</code></td><td><code>nothing</code></td><td>Initial primal solution vector (optional).</td></tr>
+    <tr><td><code>initial_y</code></td><td><code>nothing</code></td><td>Initial dual solution vector (optional).</td></tr>
+    <tr><td><code>auto_save</code></td><td><code>false</code></td><td>Automatically save the best x, y, and sigma during optimization.</td></tr>
+    <tr><td><code>save_filename</code></td><td><code>"hprlp_autosave.h5"</code></td><td>Filename for auto-save HDF5 file.</td></tr>
   </tbody>
 </table>
 
@@ -212,28 +237,12 @@ println("x2 = ", result.x[2])
 </table>
 
 ---
+
 ## Reference
 
 Kaihuang Chen, [Defeng Sun](https://www.polyu.edu.hk/ama/profile/dfsun//), [Yancheng Yuan](https://www.polyu.edu.hk/ama/people/academic-staff/dr-yuan-yancheng/?sc_lang=en), Guojun Zhang, and [Xinyuan Zhao](https://scholar.google.com/citations?user=nFG8lEYAAAAJ&hl=en), “[HPR-LP: An implementation of an HPR method for solving linear programming](https://www.polyu.edu.hk/ama/profile/dfsun//files/HPR-LP_Published2025.pdf)”, arXiv:2408.12179 (August 2024), [Mathematical Programming Computation](https://link.springer.com/journal/12532) 17 (2025), doi.org/10.1007/s12532-025-00292-0.
 
 ---
-## Available HPR-LP Implementations
-
-For the C implementation on GPUs, please visit the following repository:
-
-[https://github.com/PolyU-IOR/HPR-LP-C](https://github.com/PolyU-IOR/HPR-LP-C)
-
-For the Julia implementation on CPUs and GPUs, please visit the following repository:
-
-[https://github.com/PolyU-IOR/HPR-LP](https://github.com/PolyU-IOR/HPR-LP)
-
-For the Python implementation on GPUs, please visit the following repository:
-
-[https://github.com/PolyU-IOR/HPR-LP-Python](https://github.com/PolyU-IOR/HPR-LP-Python)
-
-For the MATLAB implementation on CPUs, please visit the following repository:  
-
-[https://github.com/PolyU-IOR/HPR-LP-MATLAB](https://github.com/PolyU-IOR/HPR-LP-MATLAB)
 
 
 
