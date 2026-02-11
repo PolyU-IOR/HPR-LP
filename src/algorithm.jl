@@ -114,6 +114,12 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     scbc = sc.b_scale * sc.c_scale
     res.primal_obj_bar = scbc * CUDA.dot(ws.c, ws.x_bar) + lp.obj_constant
     if iter == 0 && (params.initial_y !== nothing || params.initial_x !== nothing)
+        # Project z_bar so support(-z_bar, [l,u]) is finite.
+        # If u_i = +Inf, then z_i must be >= 0; if l_i = -Inf, then z_i must be <= 0; if both infinite, z_i = 0.
+        @. ws.z_bar = ifelse(isinf(lp.u) & isinf(lp.l), 0.0,
+            ifelse(lp.u .== 1e100, max(ws.z_bar, 0.0),
+                ifelse(lp.l .== -1e100, min(ws.z_bar, 0.0), ws.z_bar)))
+        
         # Compute dual objective as negative of support function of -y_bar on [AL, AU] and -z_bar on [l, u]
         support_y = CUDA.mapreduce((yb, al, au) -> yb >= 0 ? yb * al : yb * au, +, ws.y_bar, lp.AL, lp.AU)
         support_z = CUDA.mapreduce((zb, lb, ub) -> zb >= 0 ? zb * lb : zb * ub, +, ws.z_bar, lp.l, lp.u)
@@ -166,6 +172,11 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
     scbc = sc.b_scale * sc.c_scale
     res.primal_obj_bar = scbc * dot(ws.c, ws.x_bar) + lp.obj_constant
     if iter == 0 && (params.initial_y !== nothing || params.initial_x !== nothing)
+        # Project z_bar so support(-z_bar, [l,u]) is finite.
+        # If u_i = +Inf, then z_i must be >= 0; if l_i = -Inf, then z_i must be <= 0; if both infinite, z_i = 0.
+        @. ws.z_bar = ifelse(isinf(lp.u) & isinf(lp.l), 0.0,
+            ifelse(lp.u.==1e100, max(ws.z_bar, 0.0),
+                ifelse(lp.l.== -1e100, min(ws.z_bar, 0.0), ws.z_bar)))
         # Compute dual objective as negative of support function of -y_bar on [AL, AU] and -z_bar on [l, u]
         support_y = sum(((yb, al, au),) -> yb >= 0 ? yb * al : yb * au, zip(ws.y_bar, lp.AL, lp.AU))
         support_z = sum(((zb, lb, ub),) -> zb >= 0 ? zb * lb : zb * ub, zip(ws.z_bar, lp.l, lp.u))
