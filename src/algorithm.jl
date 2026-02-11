@@ -113,7 +113,14 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     ### obj
     scbc = sc.b_scale * sc.c_scale
     res.primal_obj_bar = scbc * CUDA.dot(ws.c, ws.x_bar) + lp.obj_constant
-    res.dual_obj_bar = scbc * (CUDA.dot(ws.y_obj, ws.y_bar) + CUDA.dot(ws.x_bar, ws.z_bar)) + lp.obj_constant
+    if iter == 0 && (params.initial_y !== nothing || params.initial_x !== nothing)
+        # Compute dual objective as negative of support function of -y_bar on [AL, AU] and -z_bar on [l, u]
+        support_y = CUDA.mapreduce((yb, al, au) -> yb >= 0 ? yb * al : yb * au, +, ws.y_bar, lp.AL, lp.AU)
+        support_z = CUDA.mapreduce((zb, lb, ub) -> zb >= 0 ? zb * lb : zb * ub, +, ws.z_bar, lp.l, lp.u)
+        res.dual_obj_bar = scbc * (support_y + support_z) + lp.obj_constant
+    else
+        res.dual_obj_bar = scbc * (CUDA.dot(ws.y_obj, ws.y_bar) + CUDA.dot(ws.x_bar, ws.z_bar)) + lp.obj_constant
+    end
     res.rel_gap_bar = abs(res.primal_obj_bar - res.dual_obj_bar) / (1.0 + abs(res.primal_obj_bar) + abs(res.dual_obj_bar))
 
     ### Rd
@@ -158,7 +165,14 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
     ### obj
     scbc = sc.b_scale * sc.c_scale
     res.primal_obj_bar = scbc * dot(ws.c, ws.x_bar) + lp.obj_constant
-    res.dual_obj_bar = scbc * (dot(ws.y_obj, ws.y_bar) + dot(ws.x_bar, ws.z_bar)) + lp.obj_constant
+    if iter == 0 && (params.initial_y !== nothing || params.initial_x !== nothing)
+        # Compute dual objective as negative of support function of -y_bar on [AL, AU] and -z_bar on [l, u]
+        support_y = sum(((yb, al, au),) -> yb >= 0 ? yb * al : yb * au, zip(ws.y_bar, lp.AL, lp.AU))
+        support_z = sum(((zb, lb, ub),) -> zb >= 0 ? zb * lb : zb * ub, zip(ws.z_bar, lp.l, lp.u))
+        res.dual_obj_bar = scbc * (support_y + support_z) + lp.obj_constant
+    else
+        res.dual_obj_bar = scbc * (dot(ws.y_obj, ws.y_bar) + dot(ws.x_bar, ws.z_bar)) + lp.obj_constant
+    end
     res.rel_gap_bar = abs(res.primal_obj_bar - res.dual_obj_bar) / (1.0 + abs(res.primal_obj_bar) + abs(res.dual_obj_bar))
 
     ### Rd
@@ -1129,22 +1143,6 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
 
     # Power iteration to estimate lambda_max
     power_time = compute_maximum_eigenvalue!(lp, ws, params)
-
-    # Compute y_obj if initial_y was provided (now that lambda_max is known)
-    if params.initial_y !== nothing
-        fact1 = ws.lambda_max * ws.sigma
-        if params.use_gpu
-            # Compute Ax for initial x (or use zeros if no initial x)
-            CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha,
-                ws.spmv_A.desc_A, ws.spmv_A.desc_x_bar, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
-                ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
-            compute_y_obj_gpu!(ws.y_obj, ws.y, ws.AL, ws.AU, ws.Ax, fact1, ws.m)
-        else
-            # Compute Ax for initial x (or use zeros if no initial x)
-            mul!(ws.Ax, ws.A, ws.x_bar)
-            compute_y_obj_cpu!(ws.y_obj, ws.y, ws.AL, ws.AU, ws.Ax, fact1)
-        end
-    end
 
 
     if params.verbose

@@ -115,6 +115,11 @@ function scaling!(lp::LP_info_cpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_sc
     lp.AT = transpose(lp.A)
     scaling_info.row_norm = row_norm
     scaling_info.col_norm = col_norm
+
+    lp.AL[lp.AL .== -Inf] .= -1.0e100
+    lp.AU[lp.AU .== Inf] .= 1.0e100
+    lp.l[lp.l .== -Inf] .= -1.0e100
+    lp.u[lp.u .== Inf] .= 1.0e100
     return scaling_info
 end
 
@@ -325,6 +330,11 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
     # Store the cumulative scaling norms
     scaling_info.row_norm = row_norm
     scaling_info.col_norm = col_norm
+
+    lp.AL[lp.AL .== -Inf] .= -1.0e100
+    lp.AU[lp.AU .== Inf] .= 1.0e100
+    lp.l[lp.l .== -Inf] .= -1.0e100
+    lp.u[lp.u .== Inf] .= 1.0e100
 
     return scaling_info
 end

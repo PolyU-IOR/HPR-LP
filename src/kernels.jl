@@ -11,50 +11,6 @@ function axpby_gpu!(a::Float64, x::CuVector{Float64}, b::Float64, y::CuVector{Fl
     @cuda threads = 256 blocks = ceil(Int, n / 256) axpby_kernel!(a, x, b, y, z, n)
 end
 
-# kernel to compute y_obj from y for initialization
-# Computes y_obj as the projection of v onto [AL, AU] where v = Ax - fact1 * y
-function compute_y_obj_kernel!(y_obj::CuDeviceVector{Float64},
-    y::CuDeviceVector{Float64},
-    AL::CuDeviceVector{Float64},
-    AU::CuDeviceVector{Float64},
-    Ax::CuDeviceVector{Float64},
-    fact1::Float64,
-    m::Int)
-    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
-    if i <= m
-        @inbounds begin
-            yi = y[i]
-            ai = Ax[i]
-            li = AL[i]
-            ui = AU[i]
-            v = ai - fact1 * yi
-            # Branchless projection: clamp(v, li, ui)
-            d = max(li - v, min(ui - v, 0.0))
-            y_obj[i] = v + d
-        end
-    end
-    return
-end
-
-function compute_y_obj_gpu!(y_obj::CuVector{Float64}, y::CuVector{Float64}, AL::CuVector{Float64}, AU::CuVector{Float64}, Ax::CuVector{Float64}, fact1::Float64, m::Int)
-    @cuda threads = 256 blocks = ceil(Int, m / 256) compute_y_obj_kernel!(y_obj, y, AL, AU, Ax, fact1, m)
-end
-
-function compute_y_obj_cpu!(y_obj::Vector{Float64}, y::Vector{Float64}, AL::Vector{Float64}, AU::Vector{Float64}, Ax::Vector{Float64}, fact1::Float64)
-    @simd for i in eachindex(y_obj)
-        @inbounds begin
-            yi = y[i]
-            ai = Ax[i]
-            li = AL[i]
-            ui = AU[i]
-            v = ai - fact1 * yi
-            # Branchless projection: clamp(v, li, ui)
-            d = max(li - v, min(ui - v, 0.0))
-            y_obj[i] = v + d
-        end
-    end
-end
-
 function update_x_z_check_kernel!(dx::CuDeviceVector{Float64},
     x::CuDeviceVector{Float64},
     z_bar::CuDeviceVector{Float64},
