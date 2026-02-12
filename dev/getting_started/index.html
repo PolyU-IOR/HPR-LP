@@ -14,25 +14,27 @@ using SparseArrays
 # Convert to standard form: AL ≤ Ax ≤ AU
 # Inequality ax + by ≤ c becomes -ax - by ≥ -c (i.e., AL = -c, AU = ∞)
 A = sparse([-1.0 -2.0; -3.0 -1.0])
+c = [-3.0, -5.0]
 AL = [-10.0, -12.0]
 AU = [Inf, Inf]
-c = [-3.0, -5.0]
 l = [0.0, 0.0]
 u = [Inf, Inf]
-obj_constant = 0.0
 
-# Set up parameters
+# Step 1: Build the model
+model = build_from_Abc(A, c, AL, AU, l, u)
+
+# Step 2: Set up parameters
 params = HPRLP_parameters()
 params.use_gpu = false      # Use CPU for this small problem
-params.stoptol = 1e-4      # Convergence tolerance
-params.time_limit = 60     # Maximum 60 seconds
-params.verbose = true      # Print solver output
+params.stoptol = 1e-4       # Convergence tolerance
+params.time_limit = 60      # Maximum 60 seconds
+params.verbose = true       # Print solver output
 
-# Solve
-result = run_lp(A, AL, AU, c, l, u, obj_constant, params)
+# Step 3: Solve
+result = optimize(model, params)
 
 # Check results
-println(&quot;Status: &quot;, result.output_type)
+println(&quot;Status: &quot;, result.status)
 println(&quot;Optimal value: &quot;, result.primal_obj)
 println(&quot;Solution: x₁ = &quot;, result.x[1], &quot;, x₂ = &quot;, result.x[2])
 println(&quot;Iterations: &quot;, result.iter)
@@ -62,6 +64,11 @@ println(&quot;Optimal value: &quot;, objective_value(model))
 println(&quot;Solution: x₁ = &quot;, value(x1), &quot;, x₂ = &quot;, value(x2))
 println(&quot;Solve time: &quot;, solve_time(model), &quot; seconds&quot;)</code></pre><h3 id="Solve-the-instance-from-MPS-Files"><a class="docs-heading-anchor" href="#Solve-the-instance-from-MPS-Files">Solve the instance from MPS Files</a><a id="Solve-the-instance-from-MPS-Files-1"></a><a class="docs-heading-anchor-permalink" href="#Solve-the-instance-from-MPS-Files" title="Permalink"></a></h3><pre><code class="language-julia hljs">using HPRLP
 
-# Simple solve with defaults
+# Build model from file
+model = build_from_mps(&quot;model.mps&quot;)
+
+# Set parameters
 params = HPRLP_parameters()
-result = run_single(&quot;model.mps&quot;, params)</code></pre><h2 id="Next-Steps"><a class="docs-heading-anchor" href="#Next-Steps">Next Steps</a><a id="Next-Steps-1"></a><a class="docs-heading-anchor-permalink" href="#Next-Steps" title="Permalink"></a></h2><ul><li>Learn about <a href="../guide/mps_files/">solving MPS files</a></li><li>Explore the <a href="../guide/direct_api/">Direct API</a> in detail</li><li>See more <a href="../guide/jump_integration/">JuMP integration examples</a></li><li>Check out the full <a href="../api/">API Reference</a></li><li>Browse additional <a href="../examples/">Examples</a></li></ul><h2 id="Performance-Tips"><a class="docs-heading-anchor" href="#Performance-Tips">Performance Tips</a><a id="Performance-Tips-1"></a><a class="docs-heading-anchor-permalink" href="#Performance-Tips" title="Permalink"></a></h2><ol><li><p><strong>JIT Compilation</strong>: The first run will be slow due to Julia&#39;s JIT compilation. For benchmarking, run the solver twice or use a warm-up phase.</p></li><li><p><strong>GPU Usage</strong>: For large problems (typically &gt; 10,000 variables/constraints), GPU acceleration can provide significant speedups.</p></li><li><p><strong>Scaling</strong>: The default scaling methods (Ruiz and Pock-Chambolle) improve numerical stability. Keep them enabled unless you have specific reasons to disable them.</p></li><li><p><strong>Tolerance</strong>: The default <code>stoptol = 1e-4</code> is relatively loose. Increase for more accurate solutions in critical applications.</p></li></ol></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../">« Home</a><a class="docs-footer-nextpage" href="../guide/input_overview/">Overview »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.16.0 on <span class="colophon-date" title="Tuesday 25 November 2025 07:25">Tuesday 25 November 2025</span>. Using Julia version 1.10.10.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
+
+# Solve
+result = optimize(model, params)</code></pre><h2 id="Next-Steps"><a class="docs-heading-anchor" href="#Next-Steps">Next Steps</a><a id="Next-Steps-1"></a><a class="docs-heading-anchor-permalink" href="#Next-Steps" title="Permalink"></a></h2><ul><li>Learn about <a href="../guide/mps_files/">solving MPS files</a></li><li>Explore the <a href="../guide/direct_api/">Direct API</a> in detail</li><li>See more <a href="../guide/jump_integration/">JuMP integration examples</a></li><li>Check out the full <a href="../api/">API Reference</a></li><li>Browse additional <a href="../examples/">Examples</a></li></ul><h2 id="Performance-Tips"><a class="docs-heading-anchor" href="#Performance-Tips">Performance Tips</a><a id="Performance-Tips-1"></a><a class="docs-heading-anchor-permalink" href="#Performance-Tips" title="Permalink"></a></h2><ol><li><p><strong>JIT Compilation</strong>: The first run will be slow due to Julia&#39;s JIT compilation. For benchmarking, run the solver twice or use a warm-up phase.</p></li><li><p><strong>GPU Usage</strong>: For large problems (typically &gt; 10,000 variables/constraints), GPU acceleration can provide significant speedups.</p></li><li><p><strong>Scaling</strong>: The default scaling methods (Ruiz and Pock-Chambolle) improve numerical stability. Keep them enabled unless you have specific reasons to disable them.</p></li><li><p><strong>Tolerance</strong>: The default <code>stoptol = 1e-4</code> is relatively loose. Increase for more accurate solutions in critical applications.</p></li></ol></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../">« Home</a><a class="docs-footer-nextpage" href="../guide/input_overview/">Overview »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.16.0 on <span class="colophon-date" title="Thursday 12 February 2026 13:21">Thursday 12 February 2026</span>. Using Julia version 1.10.10.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
