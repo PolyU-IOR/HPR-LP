@@ -116,7 +116,7 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     if iter == 0 && (params.initial_y !== nothing || params.initial_x !== nothing)
         # Project z_bar so support(-z_bar, [l,u]) is finite.
         # If u_i = +Inf, then z_i must be >= 0; if l_i = -Inf, then z_i must be <= 0; if both infinite, z_i = 0.
-        @. ws.z_bar = ifelse(isinf(lp.u) & isinf(lp.l), 0.0,
+        @. ws.z_bar = ifelse((lp.u .== 1e100) & (lp.l .== -1e100), 0.0,
             ifelse(lp.u .== 1e100, max(ws.z_bar, 0.0),
                 ifelse(lp.l .== -1e100, min(ws.z_bar, 0.0), ws.z_bar)))
         
@@ -174,7 +174,7 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
     if iter == 0 && (params.initial_y !== nothing || params.initial_x !== nothing)
         # Project z_bar so support(-z_bar, [l,u]) is finite.
         # If u_i = +Inf, then z_i must be >= 0; if l_i = -Inf, then z_i must be <= 0; if both infinite, z_i = 0.
-        @. ws.z_bar = ifelse(isinf(lp.u) & isinf(lp.l), 0.0,
+        @. ws.z_bar = ifelse((lp.u .== 1e100) & (lp.l .== -1e100), 0.0,
             ifelse(lp.u.==1e100, max(ws.z_bar, 0.0),
                 ifelse(lp.l.== -1e100, min(ws.z_bar, 0.0), ws.z_bar)))
         # Compute dual objective as negative of support function of -y_bar on [AL, AU] and -z_bar on [l, u]
@@ -550,6 +550,11 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
         # Scale y on GPU: inverse of y_result = c_scale * (y_bar / row_norm)
         # So y_bar = y_input * row_norm / c_scale
         ws.y .= ws.y .* scaling_info.row_norm ./ scaling_info.c_scale
+        # Project y_bar so support(-y_bar, [AL,AU]) is finite.
+        # If AU_i = +Inf, then y_i must be >= 0; if AL_i = -Inf, then y_i must be <= 0; if both infinite, y_i = 0.
+        @. ws.y = ifelse((lp.AU .== 1e100) & (lp.AL .== -1e100), 0.0,
+            ifelse(lp.AU .== 1e100, max(ws.y, 0.0),
+                ifelse(lp.AL .== -1e100, min(ws.y, 0.0), ws.y)))
         ws.y_bar .= ws.y
         ws.last_y .= ws.y
 
@@ -630,6 +635,11 @@ function allocate_workspace_cpu(lp::LP_info_cpu, scaling_info::Scaling_info_cpu,
         # Scale y: inverse of y_result = c_scale * (y_bar / row_norm)
         # So y_bar = y_input * row_norm / c_scale
         scaled_y = params.initial_y .* scaling_info.row_norm ./ scaling_info.c_scale
+        # Project y_bar so support(-y_bar, [AL,AU]) is finite.
+        # If AU_i = +Inf, then y_i must be >= 0; if AL_i = -Inf, then y_i must be <= 0; if both infinite, y_i = 0.
+        @. scaled_y = ifelse((lp.AU .== 1e100) & (lp.AL .== -1e100), 0.0,
+            ifelse(lp.AU .== 1e100, max(scaled_y, 0.0),
+                ifelse(lp.AL .== -1e100, min(scaled_y, 0.0), scaled_y)))
         ws.y .= scaled_y
         ws.y_bar .= scaled_y
         ws.last_y .= scaled_y
