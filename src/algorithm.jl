@@ -852,9 +852,9 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
             ifelse(ws.AU >= 1e90, UInt8(1), ifelse(ws.AL <= -1e90, UInt8(2), UInt8(3))))
 
         ws.A_rows_short, ws.A_rows_medium, ws.A_rows_long =
-            build_csr_row_buckets(lp.A.rowPtr; short_max=Int32(16), medium_max=Int32(128))
+            build_csr_row_buckets(lp.A.rowPtr; short_max=Int32(16), medium_max=Int32(1e9))
         ws.AT_rows_short, ws.AT_rows_medium, ws.AT_rows_long =
-            build_csr_row_buckets(lp.AT.rowPtr; short_max=Int32(16), medium_max=Int32(128))
+            build_csr_row_buckets(lp.AT.rowPtr; short_max=Int32(16), medium_max=Int32(1e9))
         ws.A_long_partial = CUDA.zeros(Float64, fused_y_long_partial_length(length(ws.A_rows_long)))
         fuse_x_mode = normalize_custom_backend_mode(get(ENV, "HPRLP_CUSTOM_CSR_ALG2_FUSE_X", "auto"))
         if fuse_x_mode == :on
@@ -1339,6 +1339,28 @@ function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_g
     bench_iters = min(params.max_iter, deterministic_probe_iterations())
     if params.autotune_verbose
         println("AUTO-SELECT custom backends (", bench_iters, " deterministic iterations per candidate) ...")
+        n_A_short = length(ws.A_rows_short)
+        n_A_medium = length(ws.A_rows_medium)
+        n_A_total = n_A_short + n_A_medium
+        n_AT_short = length(ws.AT_rows_short)
+        n_AT_medium = length(ws.AT_rows_medium)
+        n_AT_total = n_AT_short + n_AT_medium
+        p_A_short = n_A_total > 0 ? 100.0 * n_A_short / n_A_total : 0.0
+        p_A_medium = n_A_total > 0 ? 100.0 * n_A_medium / n_A_total : 0.0
+        p_AT_short = n_AT_total > 0 ? 100.0 * n_AT_short / n_AT_total : 0.0
+        p_AT_medium = n_AT_total > 0 ? 100.0 * n_AT_medium / n_AT_total : 0.0
+        println("  A row buckets: short=", n_A_short,
+            ", medium=", n_A_medium,
+            ", total=", n_A_total,
+            " [",
+            @sprintf("%.1f%%", p_A_short), ", ",
+            @sprintf("%.1f%%", p_A_medium), "]")
+        println("  AT row buckets: short=", n_AT_short,
+            ", medium=", n_AT_medium,
+            ", total=", n_AT_total,
+            " [",
+            @sprintf("%.1f%%", p_AT_short), ", ",
+            @sprintf("%.1f%%", p_AT_medium), "]")
     end
 
     x_save = copy(ws.x)
