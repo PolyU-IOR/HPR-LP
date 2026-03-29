@@ -50,12 +50,47 @@ The solve function is the core solver, executing the following steps:
 =#
 
 # the function to compute the M norm 
+@inline function queue_dot!(buf::CuVector{Float64}, idx::Int, x::CuVector{Float64}, y::CuVector{Float64})
+    CUDA.CUBLAS.dot(length(x), x, y, CUDA.CuRefArray(buf, idx))
+    return nothing
+end
+
+@inline function queue_nrm2!(buf::CuVector{Float64}, idx::Int, x::CuVector{Float64})
+    CUDA.CUBLAS.nrm2(length(x), x, CUDA.CuRefArray(buf, idx))
+    return nothing
+end
+
+@inline function fetch_reduction_scalars!(ws::HPRLP_workspace_gpu)
+    host = ws.reduction_scalars_host
+    dev = ws.reduction_scalars
+    n = length(host)
+    GC.@preserve host dev begin
+        # Keep identical host-visible semantics (values ready on return) while
+        # avoiding the extra pre-sync used by generic copyto!(Array, CuArray).
+        unsafe_copyto!(pointer(host), pointer(dev), n; async=false)
+    end
+    return host
+end
+
+@inline function compute_restart_movement_norms_gpu!(ws::HPRLP_workspace_gpu)
+    axpby_gpu!(1.0, ws.x_bar, -1.0, ws.last_x, ws.dx, ws.n)
+    axpby_gpu!(1.0, ws.y_bar, -1.0, ws.last_y, ws.dy, ws.m)
+    queue_nrm2!(ws.reduction_scalars, 9, ws.dx)
+    queue_nrm2!(ws.reduction_scalars, 10, ws.dy)
+    fetch_reduction_scalars!(ws)
+    return nothing
+end
+
 function compute_weighted_norm_gpu!(ws::HPRLP_workspace_gpu)
     CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha, ws.spmv_A.desc_A, ws.spmv_A.desc_dx, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
         ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
-    dot_prod = 2 * CUDA.dot(ws.Ax, ws.dy)
-    dy_squarenorm = CUDA.dot(ws.dy, ws.dy)
-    dx_squarenorm = CUDA.dot(ws.dx, ws.dx)
+    queue_dot!(ws.reduction_scalars, 1, ws.Ax, ws.dy)
+    queue_dot!(ws.reduction_scalars, 2, ws.dy, ws.dy)
+    queue_dot!(ws.reduction_scalars, 3, ws.dx, ws.dx)
+    reduction_scalars_host = fetch_reduction_scalars!(ws)
+    dot_prod = 2 * reduction_scalars_host[1]
+    dy_squarenorm = reduction_scalars_host[2]
+    dx_squarenorm = reduction_scalars_host[3]
     weighted_norm = ws.sigma * (ws.lambda_max * dy_squarenorm) + (dx_squarenorm) / ws.sigma + dot_prod
     if weighted_norm < 0
         println("The estimated maximum eigenvalue is too small! Current value is ", ws.lambda_max)
@@ -66,6 +101,43 @@ function compute_weighted_norm_gpu!(ws::HPRLP_workspace_gpu)
         weighted_norm = sqrt(weighted_norm)
     end
     return weighted_norm
+end
+
+@inline function queue_pending_last_gap_gpu!(ws::HPRLP_workspace_gpu)
+    # Reuse reduction slots 11:13 for deferred restart-gap terms.
+    CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha, ws.spmv_A.desc_A, ws.spmv_A.desc_dx, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
+        ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
+    queue_dot!(ws.reduction_scalars, 11, ws.Ax, ws.dy)
+    queue_dot!(ws.reduction_scalars, 12, ws.dy, ws.dy)
+    queue_dot!(ws.reduction_scalars, 13, ws.dx, ws.dx)
+    ws.pending_last_gap_sigma = ws.sigma
+    ws.pending_last_gap_lambda_max = ws.lambda_max
+    ws.pending_last_gap = true
+    return nothing
+end
+
+@inline function consume_pending_last_gap_gpu!(ws::HPRLP_workspace_gpu, restart_info::HPRLP_restart)
+    if !ws.pending_last_gap
+        return nothing
+    end
+    reduction_scalars_host = ws.reduction_scalars_host
+    sigma = ws.pending_last_gap_sigma
+    lambda_max = ws.pending_last_gap_lambda_max
+    dot_prod = 2 * reduction_scalars_host[11]
+    dy_squarenorm = reduction_scalars_host[12]
+    dx_squarenorm = reduction_scalars_host[13]
+    weighted_norm = sigma * (lambda_max * dy_squarenorm) + (dx_squarenorm) / sigma + dot_prod
+    if weighted_norm < 0
+        println("The estimated maximum eigenvalue is too small! Current value is ", lambda_max)
+        ws.lambda_max = -(dot_prod + (dx_squarenorm) / sigma) / (sigma * (dy_squarenorm)) * 1.05
+        println("The new estimated maximum eigenvalue is ", ws.lambda_max)
+        weighted_norm = sqrt(-(dot_prod + (dx_squarenorm) / sigma) * 0.05)
+    else
+        weighted_norm = sqrt(weighted_norm)
+    end
+    restart_info.last_gap = weighted_norm
+    ws.pending_last_gap = false
+    return nothing
 end
 
 function compute_weighted_norm_cpu!(ws::HPRLP_workspace_cpu)
@@ -109,39 +181,92 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     iter::Int,
     params::HPRLP_parameters,
     restart_info::HPRLP_restart,
+    compute_gap::Bool=false,
 )
     ### obj
     scbc = sc.b_scale * sc.c_scale
-    res.primal_obj_bar = scbc * CUDA.dot(ws.c, ws.x_bar) + lp.obj_constant
-    if iter == 0 && (params.initial_y !== nothing || params.initial_x !== nothing)
+    queue_dot!(ws.reduction_scalars, 1, ws.c, ws.x_bar)
+
+    use_support_dual = iter == 0 && (params.initial_y !== nothing || params.initial_x !== nothing)
+    support_y = 0.0
+    support_z = 0.0
+    if use_support_dual
         # Project z_bar so support(-z_bar, [l,u]) is finite.
         # If u_i = +Inf, then z_i must be >= 0; if l_i = -Inf, then z_i must be <= 0; if both infinite, z_i = 0.
         @. ws.z_bar = ifelse((lp.u .== 1e100) & (lp.l .== -1e100), 0.0,
             ifelse(lp.u .== 1e100, max(ws.z_bar, 0.0),
                 ifelse(lp.l .== -1e100, min(ws.z_bar, 0.0), ws.z_bar)))
-        
+
         # Compute dual objective as negative of support function of -y_bar on [AL, AU] and -z_bar on [l, u]
         support_y = CUDA.mapreduce((yb, al, au) -> yb >= 0 ? yb * al : yb * au, +, ws.y_bar, lp.AL, lp.AU)
         support_z = CUDA.mapreduce((zb, lb, ub) -> zb >= 0 ? zb * lb : zb * ub, +, ws.z_bar, lp.l, lp.u)
-        res.dual_obj_bar = scbc * (support_y + support_z) + lp.obj_constant
     else
-        res.dual_obj_bar = scbc * (CUDA.dot(ws.y_obj, ws.y_bar) + CUDA.dot(ws.x_bar, ws.z_bar)) + lp.obj_constant
+        queue_dot!(ws.reduction_scalars, 2, ws.y_obj, ws.y_bar)
+        queue_dot!(ws.reduction_scalars, 3, ws.x_bar, ws.z_bar)
     end
-    res.rel_gap_bar = abs(res.primal_obj_bar - res.dual_obj_bar) / (1.0 + abs(res.primal_obj_bar) + abs(res.dual_obj_bar))
+
+    # Periodic restart gap computation:
+    # keep identical arithmetic/reduction order, but batch this with the
+    # residual readback to avoid an extra device->host sync.
+    if compute_gap
+        CUDA.CUSPARSE.cusparseSpMV(ws.spmv_A.handle, ws.spmv_A.operator, ws.spmv_A.alpha, ws.spmv_A.desc_A, ws.spmv_A.desc_dx, ws.spmv_A.beta, ws.spmv_A.desc_Ax,
+            ws.spmv_A.compute_type, ws.spmv_A.alg, ws.spmv_A.buf)
+        queue_dot!(ws.reduction_scalars, 6, ws.Ax, ws.dy)
+        queue_dot!(ws.reduction_scalars, 7, ws.dy, ws.dy)
+        queue_dot!(ws.reduction_scalars, 8, ws.dx, ws.dx)
+        # Also precompute restart movement norms here so update_sigma! can reuse
+        # the same fetch without an extra restart-time synchronization.
+        # axpby_gpu!(1.0, ws.x_bar, -1.0, ws.last_x, ws.dx, ws.n)
+        # axpby_gpu!(1.0, ws.y_bar, -1.0, ws.last_y, ws.dy, ws.m)
+        # queue_nrm2!(ws.reduction_scalars, 9, ws.dx)
+        # queue_nrm2!(ws.reduction_scalars, 10, ws.dy)
+    end
 
     ### Rd
     compute_Rd_gpu!(ws, sc)
-    res.err_Rd_org_bar = sc.c_scale * CUDA.norm(ws.Rd) / sc.norm_c_org
+    queue_nrm2!(ws.reduction_scalars, 4, ws.Rd)
 
     ### Rp
     compute_err_Rp_gpu!(ws, sc)
-    res.err_Rp_org_bar = sc.b_scale * CUDA.norm(ws.Rp) / sc.norm_b_org
+    queue_nrm2!(ws.reduction_scalars, 5, ws.Rp)
 
     if iter == 0
         @cuda threads = 256 blocks = ceil(Int, ws.n / 256) compute_err_lu_kernel!(sc.col_norm, ws.dx, ws.x_bar, ws.l, ws.u, ws.n)
+        # queue_nrm2!(ws.reduction_scalars, 6, ws.dx)
+    end
+
+    reduction_scalars_host = fetch_reduction_scalars!(ws)
+    res.primal_obj_bar = scbc * reduction_scalars_host[1] + lp.obj_constant
+    if use_support_dual
+        res.dual_obj_bar = scbc * (support_y + support_z) + lp.obj_constant
+    else
+        res.dual_obj_bar = scbc * (reduction_scalars_host[2] + reduction_scalars_host[3]) + lp.obj_constant
+    end
+    res.rel_gap_bar = abs(res.primal_obj_bar - res.dual_obj_bar) / (1.0 + abs(res.primal_obj_bar) + abs(res.dual_obj_bar))
+
+    res.err_Rd_org_bar = sc.c_scale * reduction_scalars_host[4] / sc.norm_c_org
+    res.err_Rp_org_bar = sc.b_scale * reduction_scalars_host[5] / sc.norm_b_org
+
+    if iter == 0
         res.err_Rp_org_bar = max(res.err_Rp_org_bar, sc.b_scale * CUDA.norm(ws.dx))
     end
     res.KKTx_and_gap_org_bar = max(res.err_Rp_org_bar, res.err_Rd_org_bar, res.rel_gap_bar)
+
+    if compute_gap
+        dot_prod = 2 * reduction_scalars_host[6]
+        dy_squarenorm = reduction_scalars_host[7]
+        dx_squarenorm = reduction_scalars_host[8]
+        weighted_norm = ws.sigma * (ws.lambda_max * dy_squarenorm) + (dx_squarenorm) / ws.sigma + dot_prod
+        if weighted_norm < 0
+            println("The estimated maximum eigenvalue is too small! Current value is ", ws.lambda_max)
+            ws.lambda_max = -(dot_prod + (dx_squarenorm) / ws.sigma) / (ws.sigma * (dy_squarenorm)) * 1.05
+            println("The new estimated maximum eigenvalue is ", ws.lambda_max)
+            weighted_norm = sqrt(-(dot_prod + (dx_squarenorm) / ws.sigma) * 0.05)
+        else
+            weighted_norm = sqrt(weighted_norm)
+        end
+        restart_info.current_gap = weighted_norm
+    end
 
     # Save best values if auto_save is enabled
     if params.auto_save
@@ -167,6 +292,7 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
     iter::Int,
     params::HPRLP_parameters,
     restart_info::HPRLP_restart,
+    compute_gap::Bool=false,
 )
     ### obj
     scbc = sc.b_scale * sc.c_scale
@@ -175,8 +301,8 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
         # Project z_bar so support(-z_bar, [l,u]) is finite.
         # If u_i = +Inf, then z_i must be >= 0; if l_i = -Inf, then z_i must be <= 0; if both infinite, z_i = 0.
         @. ws.z_bar = ifelse((lp.u .== 1e100) & (lp.l .== -1e100), 0.0,
-            ifelse(lp.u.==1e100, max(ws.z_bar, 0.0),
-                ifelse(lp.l.== -1e100, min(ws.z_bar, 0.0), ws.z_bar)))
+            ifelse(lp.u .== 1e100, max(ws.z_bar, 0.0),
+                ifelse(lp.l .== -1e100, min(ws.z_bar, 0.0), ws.z_bar)))
         # Compute dual objective as negative of support function of -y_bar on [AL, AU] and -z_bar on [l, u]
         support_y = sum(((yb, al, au),) -> yb >= 0 ? yb * al : yb * au, zip(ws.y_bar, lp.AL, lp.AU))
         support_z = sum(((zb, lb, ub),) -> zb >= 0 ? zb * lb : zb * ub, zip(ws.z_bar, lp.l, lp.u))
@@ -200,6 +326,10 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
 
     res.KKTx_and_gap_org_bar = max(res.err_Rp_org_bar, res.err_Rd_org_bar, res.rel_gap_bar)
 
+    if compute_gap
+        restart_info.current_gap = compute_weighted_norm_cpu!(ws)
+    end
+
     # Save best values if auto_save is enabled
     if params.auto_save
         if iter == 0 || res.KKTx_and_gap_org_bar < restart_info.best_gap
@@ -216,7 +346,6 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
     end
 end
 
-
 # the function to update the value of sigma
 function update_sigma_gpu!(
     restart_info::HPRLP_restart,
@@ -224,10 +353,10 @@ function update_sigma_gpu!(
     residuals::HPRLP_residuals,
 )
     if restart_info.restart_flag >= 1 && restart_info.restart_flag <= 3
-        axpby_gpu!(1.0, ws.x_bar, -1.0, ws.last_x, ws.dx, ws.n)
-        axpby_gpu!(1.0, ws.y_bar, -1.0, ws.last_y, ws.dy, ws.m)
-        primal_move = CUDA.norm(ws.dx)
-        dual_move = CUDA.norm(ws.dy)
+        # Movement norms are populated during periodic compute_residuals_gpu!.
+        compute_restart_movement_norms_gpu!(ws)
+        primal_move = ws.reduction_scalars_host[9]
+        dual_move = ws.reduction_scalars_host[10]
         if primal_move > 1e-16 && dual_move > 1e-16 &&
            primal_move < 1e12 && dual_move < 1e12
             pm_over_dm = primal_move / dual_move
@@ -292,8 +421,6 @@ function check_restart(restart_info::HPRLP_restart,
     iter::Int,
     check_iter::Int, sigma::Float64,
 )
-
-    restart_info.restart_flag = 0
     # adaptive restart
     if restart_info.first_restart
         if iter == check_iter
@@ -353,7 +480,7 @@ end
 # the function to check whether to stop the algorithm
 function check_break(residuals::HPRLP_residuals,
     iter::Int,
-    t_start_alg::Float64,
+    elapsed_time::Float64,
     params::HPRLP_parameters,
 )
     if residuals.KKTx_and_gap_org_bar < params.stoptol
@@ -364,7 +491,7 @@ function check_break(residuals::HPRLP_residuals,
         return "MAX_ITER"
     end
 
-    if time() - t_start_alg > params.time_limit
+    if elapsed_time > params.time_limit
         return "TIME_LIMIT"
     end
 
@@ -460,36 +587,98 @@ function prepare_spmv!(A::CuSparseMatrixCSR{Float64,Int32}, AT::CuSparseMatrixCS
     desc_y = CUDA.CUSPARSE.CuDenseVectorDescriptor(y)
     desc_ATy = CUDA.CUSPARSE.CuDenseVectorDescriptor(ATy)
     CUSPARSE_handle = CUDA.CUSPARSE.handle()
+    spmv_alg = CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2
     sz_A = Ref{Csize_t}(0)
     ref_one = Ref{Float64}(one(Float64))
     ref_zero = Ref{Float64}(zero(Float64))
     CUDA.CUSPARSE.cusparseSpMV_bufferSize(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_hat, ref_zero,
-        desc_Ax, Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, sz_A)
+        desc_Ax, Float64, spmv_alg, sz_A)
 
     buf_A = CUDA.CuArray{UInt8}(undef, sz_A[])
 
     # Only call preprocess for CUDA >= 12.4
     if CUDA.CUSPARSE.version() >= v"12.4"
         CUDA.CUSPARSE.cusparseSpMV_preprocess(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_hat, ref_zero, desc_Ax,
-            Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_A)
+            Float64, spmv_alg, buf_A)
     end
 
     spmv_A = CUSPARSE_spmv_A(CUSPARSE_handle, 'N', ref_one, desc_A, desc_x_bar, desc_x_hat, desc_dx, ref_zero, desc_Ax,
-        Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_A)
+        Float64, spmv_alg, buf_A)
 
     sz_AT = Ref{Csize_t}(0)
     CUDA.CUSPARSE.cusparseSpMV_bufferSize(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y, ref_zero,
-        desc_ATy, Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, sz_AT)
+        desc_ATy, Float64, spmv_alg, sz_AT)
     buf_AT = CUDA.CuArray{UInt8}(undef, sz_AT[])
     # Only call preprocess for CUDA >= 12.4
     if CUDA.CUSPARSE.version() >= v"12.4"
         CUDA.CUSPARSE.cusparseSpMV_preprocess(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y, ref_zero, desc_ATy,
-            Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_AT)
+            Float64, spmv_alg, buf_AT)
     end
     spmv_AT = CUSPARSE_spmv_AT(CUSPARSE_handle, 'N', ref_one, desc_AT, desc_y_bar, desc_y, ref_zero, desc_ATy,
-        Float64, CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2, buf_AT)
+        Float64, spmv_alg, buf_AT)
 
     return spmv_A, spmv_AT
+end
+
+@inline deterministic_probe_iterations() = 150
+
+@inline function deterministic_probe_candidates()
+    candidates = [(use_x=false, use_y=false)]
+    push!(candidates, (use_x=true, use_y=false))
+    push!(candidates, (use_x=false, use_y=true))
+    push!(candidates, (use_x=true, use_y=true))
+    return candidates
+end
+
+@inline function choose_deterministic_probe_backend(
+    ref_metric::Float64,
+    ref_time_ns::Integer,
+    candidate_results::AbstractVector{<:NamedTuple};
+    quality_rel_tol::Float64=0.01,
+    quality_abs_tol::Float64=1e-12,
+    speedup_margin::Float64=0.05)
+
+    if !isfinite(ref_metric) || ref_time_ns <= 0
+        return (use_x=false, use_y=false, reason=:default_cusparse)
+    end
+
+    allowed_metric = ref_metric + max(quality_abs_tol, abs(ref_metric) * quality_rel_tol)
+    ref_time = Float64(ref_time_ns)
+    best_choice = (use_x=false, use_y=false, reason=:default_cusparse)
+    best_time = typemax(Float64)
+    for candidate in candidate_results
+        candidate_metric = candidate.metric
+        candidate_time = Float64(candidate.time_ns)
+        if !isfinite(candidate_metric) || candidate_metric > allowed_metric
+            continue
+        end
+        if candidate_time <= 0.0
+            continue
+        end
+        if candidate_time <= ref_time * (1.0 - speedup_margin) && candidate_time < best_time
+            best_time = candidate_time
+            best_choice = (use_x=candidate.use_x, use_y=candidate.use_y, reason=:speed)
+        end
+    end
+    return best_choice
+end
+
+@inline function build_csr_row_buckets(row_ptr::CuVector{Int32}; short_max::Int32=Int32(16))
+    row_ptr_h = Vector(row_ptr)
+    nrows = length(row_ptr_h) - 1
+    rows_short = Int32[]
+    rows_medium = Int32[]
+    sizehint!(rows_short, nrows)
+    sizehint!(rows_medium, nrows ÷ 2)
+    @inbounds for i in 1:nrows
+        nnz_i = row_ptr_h[i+1] - row_ptr_h[i]
+        if nnz_i <= short_max
+            push!(rows_short, Int32(i))
+        else
+            push!(rows_medium, Int32(i))
+        end
+    end
+    return CuArray(rows_short), CuArray(rows_medium)
 end
 
 # the function to allocate the workspace for the HPR-LP algorithm
@@ -521,6 +710,11 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     ws.Ax = CUDA.zeros(Float64, m)
     ws.last_x = CUDA.zeros(Float64, n)
     ws.last_y = CUDA.zeros(Float64, m)
+    ws.use_custom_deterministic_fused = !params.CUSPARSE_spmv
+    ws.use_custom_fused_x = false
+    ws.use_custom_fused_y = false
+    ws.x_bound_type = CuArray(UInt8[])
+    ws.y_bound_type = CuArray(UInt8[])
     ws.to_check = false
     ws.spmv_A, ws.spmv_AT = prepare_spmv!(lp.A, lp.AT, ws.x_bar, ws.x_hat, ws.dx, ws.Ax,
         ws.y_bar, ws.y, ws.ATy)
@@ -528,6 +722,25 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
         ws.sigma = scaling_info.norm_b / scaling_info.norm_c
     else
         ws.sigma = 1.0
+    end
+
+    if ws.use_custom_deterministic_fused
+        ws.x_bound_type = CUDA.zeros(UInt8, n)
+        ws.y_bound_type = CUDA.zeros(UInt8, m)
+        @. ws.x_bound_type = ifelse((ws.l <= -1e90) & (ws.u >= 1e90), UInt8(0),
+            ifelse(ws.u >= 1e90, UInt8(1), ifelse(ws.l <= -1e90, UInt8(2), UInt8(3))))
+        @. ws.y_bound_type = ifelse((ws.AL <= -1e90) & (ws.AU >= 1e90), UInt8(0),
+            ifelse(ws.AU >= 1e90, UInt8(1), ifelse(ws.AL <= -1e90, UInt8(2), UInt8(3))))
+
+        ws.A_rows_short, ws.A_rows_medium =
+            build_csr_row_buckets(lp.A.rowPtr; short_max=Int32(16))
+        ws.AT_rows_short, ws.AT_rows_medium =
+            build_csr_row_buckets(lp.AT.rowPtr; short_max=Int32(16))
+    else
+        ws.A_rows_short = CuArray(Int32[])
+        ws.A_rows_medium = CuArray(Int32[])
+        ws.AT_rows_short = CuArray(Int32[])
+        ws.AT_rows_medium = CuArray(Int32[])
     end
 
     # Initialize with user-provided initial x if available
@@ -580,7 +793,14 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     # Initialize backup flag
     ws.backup_created = false
 
-    ws.Halpern_params = CUDA.zeros(Float64, 2)
+    ws.Halpern_params = CUDA.zeros(Float64, 4)
+    ws.halpern_inner = CUDA.zeros(Int64, 1)
+    ws.halpern_factors = CuArray([0.5, 0.5])
+    ws.reduction_scalars = CUDA.zeros(Float64, 13)
+    ws.reduction_scalars_host = CUDA.pin(Vector{Float64}(undef, 13))
+    ws.pending_last_gap = false
+    ws.pending_last_gap_sigma = NaN
+    ws.pending_last_gap_lambda_max = NaN
 
     return ws
 end
@@ -749,6 +969,7 @@ function save_state_to_hdf5(
         file["parameters/use_Pock_Chambolle_scaling"] = params.use_Pock_Chambolle_scaling
         file["parameters/use_bc_scaling"] = params.use_bc_scaling
         file["parameters/use_gpu"] = params.use_gpu
+        file["parameters/CUSPARSE_spmv"] = params.CUSPARSE_spmv
         file["parameters/device_number"] = params.device_number
         file["parameters/warm_up"] = params.warm_up
         file["parameters/print_frequency"] = params.print_frequency
@@ -815,7 +1036,7 @@ function setup_gpu_model(model::LP_info_cpu, params::HPRLP_parameters)
 end
 
 # Helper function to apply scaling (CPU or GPU)
-function setup_scaling(lp::Union{LP_info_cpu, LP_info_gpu}, params::HPRLP_parameters)
+function setup_scaling(lp::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
     t_start = time()
 
     if params.use_gpu
@@ -841,7 +1062,7 @@ function setup_scaling(lp::Union{LP_info_cpu, LP_info_gpu}, params::HPRLP_parame
 end
 
 # Helper function to print solver parameters
-function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu, LP_info_gpu})
+function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu,LP_info_gpu})
     m, n = size(lp.A)
 
     # Count constraint types
@@ -871,6 +1092,7 @@ function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu
     println("    Ruiz scaling: ", params.use_Ruiz_scaling ? "Enabled" : "Disabled")
     println("    Pock-Chambolle scaling: ", params.use_Pock_Chambolle_scaling ? "Enabled" : "Disabled")
     println("    b/c scaling: ", params.use_bc_scaling ? "Enabled" : "Disabled")
+    println("  CUSPARSE_spmv: ", params.CUSPARSE_spmv ? "Enabled (force cuSPARSE, no autotune)" : "Disabled")
 
     if params.warm_up
         println("  Warm-up: Enabled (avoids JIT compilation overhead)")
@@ -939,15 +1161,206 @@ function setup_solver_functions(use_gpu::Bool)
     end
 end
 
+@inline function reset_halpern_runtime_params!(ws::HPRLP_workspace_gpu)
+    fact1 = ws.lambda_max * ws.sigma
+    inv_fact1 = 1.0 / fact1
+    inv_sigma = 1.0 / ws.sigma
+    copyto!(ws.Halpern_params, [ws.sigma, fact1, inv_fact1, inv_sigma])
+    copyto!(ws.halpern_inner, Int64[0])
+    copyto!(ws.halpern_factors, [0.5, 0.5])
+    return
+end
+
+@inline function upload_halpern_iter_params_if_needed!(
+    ws::HPRLP_workspace_gpu,
+    iter_params_host::Vector{Float64},
+    uploaded_sigma::Float64,
+    uploaded_lambda_max::Float64)
+    if ws.sigma != uploaded_sigma || ws.lambda_max != uploaded_lambda_max
+        y_fact1 = ws.lambda_max * ws.sigma
+        @inbounds begin
+            iter_params_host[1] = ws.sigma
+            iter_params_host[2] = y_fact1
+            iter_params_host[3] = 1.0 / y_fact1
+            iter_params_host[4] = 1.0 / ws.sigma
+        end
+        copyto!(ws.Halpern_params, iter_params_host)
+        uploaded_sigma = ws.sigma
+        uploaded_lambda_max = ws.lambda_max
+    end
+    return uploaded_sigma, uploaded_lambda_max
+end
+
+@inline function upload_halpern_restart_params!(
+    ws::HPRLP_workspace_gpu,
+    restart_info::HPRLP_restart,
+    halpern_inner_host::Vector{Int64},
+    halpern_factors_host::Vector{Float64})
+    if restart_info.restart_flag > 0
+        @inbounds halpern_inner_host[1] = restart_info.inner
+        copyto!(ws.halpern_inner, halpern_inner_host)
+        current_fact1 = 1.0 / (restart_info.inner + 2.0)
+        @inbounds begin
+            halpern_factors_host[1] = current_fact1
+            halpern_factors_host[2] = 1.0 - current_fact1
+        end
+        copyto!(ws.halpern_factors, halpern_factors_host)
+    end
+    return nothing
+end
+
+function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_gpu, sc::Scaling_info_gpu, params::HPRLP_parameters)
+    if !ws.use_custom_deterministic_fused
+        ws.use_custom_fused_x = false
+        ws.use_custom_fused_y = false
+        return
+    end
+    candidates = deterministic_probe_candidates()
+
+    bench_iters = min(params.max_iter, deterministic_probe_iterations())
+    if params.autotune_verbose
+        println("AUTO-SELECT custom backends (", bench_iters, " deterministic iterations per candidate) ...")
+        n_A_short = length(ws.A_rows_short)
+        n_A_medium = length(ws.A_rows_medium)
+        n_A_total = n_A_short + n_A_medium
+        n_AT_short = length(ws.AT_rows_short)
+        n_AT_medium = length(ws.AT_rows_medium)
+        n_AT_total = n_AT_short + n_AT_medium
+        p_A_short = n_A_total > 0 ? 100.0 * n_A_short / n_A_total : 0.0
+        p_A_medium = n_A_total > 0 ? 100.0 * n_A_medium / n_A_total : 0.0
+        p_AT_short = n_AT_total > 0 ? 100.0 * n_AT_short / n_AT_total : 0.0
+        p_AT_medium = n_AT_total > 0 ? 100.0 * n_AT_medium / n_AT_total : 0.0
+        println("  A row buckets: short=", n_A_short,
+            ", medium=", n_A_medium,
+            ", total=", n_A_total,
+            " [",
+            @sprintf("%.1f%%", p_A_short), ", ",
+            @sprintf("%.1f%%", p_A_medium), "]")
+        println("  AT row buckets: short=", n_AT_short,
+            ", medium=", n_AT_medium,
+            ", total=", n_AT_total,
+            " [",
+            @sprintf("%.1f%%", p_AT_short), ", ",
+            @sprintf("%.1f%%", p_AT_medium), "]")
+    end
+
+    x_save = copy(ws.x)
+    x_hat_save = copy(ws.x_hat)
+    x_bar_save = copy(ws.x_bar)
+    dx_save = copy(ws.dx)
+    y_save = copy(ws.y)
+    y_hat_save = copy(ws.y_hat)
+    y_bar_save = copy(ws.y_bar)
+    y_obj_save = copy(ws.y_obj)
+    dy_save = copy(ws.dy)
+    z_bar_save = copy(ws.z_bar)
+    ATy_save = copy(ws.ATy)
+    Ax_save = copy(ws.Ax)
+
+    function restore_state!()
+        ws.x .= x_save
+        ws.x_hat .= x_hat_save
+        ws.x_bar .= x_bar_save
+        ws.dx .= dx_save
+        ws.y .= y_save
+        ws.y_hat .= y_hat_save
+        ws.y_bar .= y_bar_save
+        ws.y_obj .= y_obj_save
+        ws.dy .= dy_save
+        ws.z_bar .= z_bar_save
+        ws.ATy .= ATy_save
+        ws.Ax .= Ax_save
+        reset_halpern_runtime_params!(ws)
+        CUDA.synchronize()
+    end
+
+    function run_candidate_probe!(use_x::Bool, use_y::Bool, iters::Int)
+        ws.use_custom_fused_x = use_x
+        ws.use_custom_fused_y = use_y
+        for _ in 1:iters
+            update_x_z_normal_gpu!(ws)
+            update_y_normal_gpu!(ws)
+        end
+        update_x_z_check_gpu!(ws)
+        update_y_check_gpu!(ws)
+        tmp_res = HPRLP_residuals()
+        tmp_restart = initialize_restart(ws.sigma)
+        compute_residuals_gpu!(ws, lp, sc, tmp_res, iters, params, tmp_restart)
+        CUDA.synchronize()
+        return tmp_res.KKTx_and_gap_org_bar
+    end
+
+    function eval_candidate(use_x::Bool, use_y::Bool, iters::Int)
+        restore_state!()
+        run_candidate_probe!(use_x, use_y, iters)
+        restore_state!()
+        CUDA.synchronize()
+        t0 = time_ns()
+        metric = run_candidate_probe!(use_x, use_y, iters)
+        CUDA.synchronize()
+        dt = time_ns() - t0
+        return metric, dt
+    end
+
+    candidate_results = Dict{Tuple{Bool,Bool},Tuple{Float64,Int64}}()
+    for candidate in candidates
+        metric, dt = eval_candidate(candidate.use_x, candidate.use_y, bench_iters)
+        candidate_results[(candidate.use_x, candidate.use_y)] = (metric, dt)
+        if params.autotune_verbose
+            println("  candidate x=", candidate.use_x ? "fused" : "cusparse",
+                ", y=", candidate.use_y ? "fused" : "cusparse",
+                " -> ", round(dt / 1e6; digits=3), " ms",
+                ", merit=", metric)
+        end
+    end
+
+    ref_metric, ref_t = candidate_results[(false, false)]
+    fused_candidates = [
+        (use_x=candidate.use_x,
+            use_y=candidate.use_y,
+            metric=candidate_results[(candidate.use_x, candidate.use_y)][1],
+            time_ns=candidate_results[(candidate.use_x, candidate.use_y)][2])
+        for candidate in candidates if candidate != (use_x=false, use_y=false)
+    ]
+    decision = choose_deterministic_probe_backend(ref_metric, ref_t, fused_candidates)
+
+    restore_state!()
+    ws.use_custom_fused_x = decision.use_x
+    ws.use_custom_fused_y = decision.use_y
+
+    if params.autotune_verbose
+        selected_metric, selected_t = candidate_results[(decision.use_x, decision.use_y)]
+        println("AUTO-SELECT selected x=", decision.use_x ? "fused" : "cusparse",
+            ", y=", decision.use_y ? "fused" : "cusparse",
+            " (", round(selected_t / 1e6; digits=3), " ms, merit=", selected_metric,
+            ", reason=", decision.reason, ")")
+    end
+    return
+end
+
 # Helper function to determine if log should be printed
-function should_print_log(iter::Int, max_iter::Int, print_frequency::Int, t_start_alg::Float64, time_limit::Float64)
+function should_print_log(iter::Int, max_iter::Int, print_frequency::Int, elapsed_time::Float64, time_limit::Float64)
     if print_frequency == -1
-        return (rem(iter, print_step(iter)) == 0) || (iter == max_iter) || (time() - t_start_alg > time_limit)
+        return (rem(iter, print_step(iter)) == 0) || (iter == max_iter) || (elapsed_time > time_limit)
     elseif print_frequency > 0
-        return (rem(iter, print_frequency) == 0) || (iter == max_iter) || (time() - t_start_alg > time_limit)
+        return (rem(iter, print_frequency) == 0) || (iter == max_iter) || (elapsed_time > time_limit)
     else
         error("Invalid print_frequency: ", print_frequency, ". It should be a positive integer or -1 for automatic printing.")
     end
+end
+
+@inline iteration_logging_enabled(verbose::Bool) = verbose
+
+@inline function next_iteration_log_iter(iter::Int, print_frequency::Int)
+    if print_frequency == -1
+        step = trunc(Int, print_step(max(iter + 1, 1)))
+    elseif print_frequency > 0
+        step = print_frequency
+    else
+        error("Invalid print_frequency: ", print_frequency,
+            ". It should be a positive integer or -1 for automatic printing.")
+    end
+    return ((iter ÷ step) + 1) * step
 end
 
 # Helper function to print iteration log
@@ -1159,11 +1572,15 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
 
     # Initialization
     residuals = HPRLP_residuals()
+    log_residuals = HPRLP_residuals()
     ws = params.use_gpu ? allocate_workspace_gpu(lp, scaling_info, params) : allocate_workspace_cpu(lp, scaling_info, params)
     restart_info = initialize_restart(ws.sigma)
 
     # Power iteration to estimate lambda_max
     power_time = compute_maximum_eigenvalue!(lp, ws, params)
+    if params.use_gpu
+        autotune_custom_update_backends!(ws, lp, scaling_info, params)
+    end
 
 
     if params.verbose
@@ -1181,22 +1598,49 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         setup_solver_functions(params.use_gpu)
 
     graph_exec = nothing
+    iter_params_host = Vector{Float64}(undef, 4)
+    halpern_inner_host = Vector{Int64}(undef, 1)
+    halpern_factors_host = Vector{Float64}(undef, 2)
+    uploaded_sigma = NaN
+    uploaded_lambda_max = NaN
+    elapsed_time = 0.0
 
     # Main iteration loop
     for iter = 0:params.max_iter
+        periodic_check = rem(iter, params.check_iter) == 0
+
         # Determine if log should be printed
-        print_yes = should_print_log(iter, params.max_iter, params.print_frequency, t_start_alg, params.time_limit)
+        if (iter & 31) == 0
+            elapsed_time = time() - t_start_alg
+        end
+        print_yes = should_print_log(iter, params.max_iter, params.print_frequency, elapsed_time, params.time_limit)
+        residuals_refreshed = false
+        # residuals_to_print = residuals
 
         # Compute residuals
-        if rem(iter, params.check_iter) == 0 || print_yes
-            compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info)
+        if periodic_check
+            compute_gap_now = params.use_gpu && iter > 0 && periodic_check
+            compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info, compute_gap_now)
+            residuals_refreshed = true
+        elseif print_yes
+            compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info, false)
+            # residuals_to_print = residuals
+        end
+        if params.use_gpu && ws.pending_last_gap && periodic_check
+            consume_pending_last_gap_gpu!(ws, restart_info)
         end
 
-        # Check termination conditions
-        status = check_break(residuals, iter, t_start_alg, params)
+        # Check termination conditions (cache wall-clock checks to reduce host overhead)
+        if (iter & 31) == 0 || print_yes
+            elapsed_time = time() - t_start_alg
+        end
+        status = check_break(residuals, iter, elapsed_time, params)
 
         # Check restart conditions
-        check_restart(restart_info, iter, params.check_iter, ws.sigma)
+        restart_info.restart_flag = 0
+        if periodic_check
+            check_restart(restart_info, iter, params.check_iter, ws.sigma)
+        end
 
         # Print iteration log
         if print_yes || (status != "CONTINUE")
@@ -1217,8 +1661,10 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         end
 
         # Check and record tolerance thresholds
-        check_and_record_tolerance!(residuals, iter, t_start_alg, tolerance_levels,
-            tolerance_times, tolerance_iters, tolerance_reached, params.verbose)
+        if residuals_refreshed
+            check_and_record_tolerance!(residuals, iter, t_start_alg, tolerance_levels,
+                tolerance_times, tolerance_iters, tolerance_reached, params.verbose)
+        end
 
         # Collect results and return if terminated
         if status != "CONTINUE"
@@ -1258,15 +1704,15 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
 
         # Determine whether to compute bar points for residuals
         ws.to_check = (rem(iter + 1, params.check_iter) == 0) || (restart_info.restart_flag > 0)
-        if params.print_frequency == -1
-            ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter + 1)) == 0)
-        elseif params.print_frequency > 0
-            ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
-        end
-        current_fact1 = 1.0 / (restart_info.inner + 2.0)
-        current_fact2 = 1.0 - current_fact1
+        # if params.print_frequency == -1
+        #     ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter + 1)) == 0)
+        # elseif params.print_frequency > 0
+        #     ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
+        # end
         if params.use_gpu
-            copyto!(ws.Halpern_params, [current_fact1, current_fact2])
+            uploaded_sigma, uploaded_lambda_max = upload_halpern_iter_params_if_needed!(
+                ws, iter_params_host, uploaded_sigma, uploaded_lambda_max)
+            upload_halpern_restart_params!(ws, restart_info, halpern_inner_host, halpern_factors_host)
 
             if ws.to_check
                 update_x_z_check_gpu!(ws)
@@ -1275,6 +1721,8 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
                 CUDA.launch(graph_exec)
             end
         else
+            current_fact1 = 1.0 / (restart_info.inner + 2.0)
+            current_fact2 = 1.0 - current_fact1
             if ws.to_check
                 update_x_z_check!(ws, current_fact1, current_fact2)
                 update_y_check!(ws, current_fact1, current_fact2)
@@ -1286,11 +1734,16 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         restart_info.inner += 1
 
         # Compute weighted norm
-        if rem(iter + 1, params.check_iter) == 0
+        if !params.use_gpu && rem(iter + 1, params.check_iter) == 0
             restart_info.current_gap = compute_weighted_norm!(ws)
         end
         if restart_info.restart_flag > 0
-            restart_info.last_gap = compute_weighted_norm!(ws)
+            if params.use_gpu
+                queue_pending_last_gap_gpu!(ws)
+                # restart_info.last_gap = compute_weighted_norm!(ws)
+            else
+                restart_info.last_gap = compute_weighted_norm!(ws)
+            end
         end
     end
 end

@@ -25,10 +25,12 @@ Parameters for the HPR-LP solver.
 - `use_Pock_Chambolle_scaling::Bool`: Enable Pock-Chambolle scaling (default: true)
 - `use_bc_scaling::Bool`: Enable b/c scaling (default: true)
 - `use_gpu::Bool`: Use GPU acceleration (default: true)
+- `CUSPARSE_spmv::Bool`: Force cuSPARSE-only SpMV path (disable fused autotune) (default: false)
 - `device_number::Int`: GPU device number (default: 0)
 - `warm_up::Bool`: Enable warm-up phase (default: true)
 - `print_frequency::Int`: Print log every N iterations, -1 for auto (default: -1)
 - `verbose::Bool`: Enable verbose output (default: true)
+- `autotune_verbose::Bool`: Enable deterministic GPU autotune logging (default: false)
 - `initial_x::Union{Vector{Float64},Nothing}`: Initial primal solution (default: nothing)
 - `initial_y::Union{Vector{Float64},Nothing}`: Initial dual solution (default: nothing)
 - `auto_save::Bool`: Automatically save best x, y, and sigma during optimization (default: false)
@@ -72,6 +74,9 @@ mutable struct HPRLP_parameters
     # use GPU or not, default is true
     use_gpu::Bool
 
+    # force cuSPARSE-only SpMV path (disable fused autotune), default is false
+    CUSPARSE_spmv::Bool
+
     # GPU device number, default is 0
     device_number::Int
 
@@ -83,6 +88,9 @@ mutable struct HPRLP_parameters
 
     # whether to print verbose output, default is true
     verbose::Bool
+
+    # whether to print deterministic autotune output, default is false
+    autotune_verbose::Bool
 
     # initial primal solution, default is nothing
     initial_x::Union{Vector{Float64},Nothing}
@@ -97,7 +105,7 @@ mutable struct HPRLP_parameters
     save_filename::String
 
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, 0, true, -1, true, nothing, nothing, false, "hprlp_autosave.h5")
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5")
 end
 
 """
@@ -373,6 +381,25 @@ mutable struct HPRLP_workspace_gpu
     # Normally used to store the vector y that the algorithm restarted last time
     last_y::CuVector{Float64}
 
+    # Whether to use the experimental deterministic fused CSR normal-update path.
+    use_custom_deterministic_fused::Bool
+
+    # Whether to use custom fused x_z normal update (otherwise cuSPARSE path).
+    use_custom_fused_x::Bool
+
+    # Whether to use custom fused y normal update (otherwise cuSPARSE path).
+    use_custom_fused_y::Bool
+
+    # Precomputed bound classes (0: free, 1: lower-only, 2: upper-only, 3: boxed).
+    x_bound_type::CuVector{UInt8}
+    y_bound_type::CuVector{UInt8}
+
+    # Row buckets for custom fused CSR kernels.
+    A_rows_short::CuVector{Int32}
+    A_rows_medium::CuVector{Int32}
+    AT_rows_short::CuVector{Int32}
+    AT_rows_medium::CuVector{Int32}
+
     # Normally used to indicate whether the termination conditions should be checked
     to_check::Bool
 
@@ -382,8 +409,30 @@ mutable struct HPRLP_workspace_gpu
     # Flag to indicate if backup file has been created in this session
     backup_created::Bool
 
-    # [NEW] Store dynamic Halpern parameters [fact1, fact2] for CUDA Graph
+    # Dynamic scalar parameters for GPU kernels:
+    # [sigma, lambda_max*sigma, 1/(lambda_max*sigma), 1/sigma]
     Halpern_params::CuVector{Float64}
+
+    # Device-side mirror of restart_info.inner for Halpern updates.
+    halpern_inner::CuVector{Int64}
+
+    # Device-side Halpern factors [fact1, fact2], updated every iteration.
+    halpern_factors::CuVector{Float64}
+
+    # Reusable device reduction outputs (dot/norm) to batch host readbacks.
+    reduction_scalars::CuVector{Float64}
+
+    # Reusable host mirror for reduction scalar readback.
+    reduction_scalars_host::Vector{Float64}
+
+    # Whether restart-gap weighted-norm terms are waiting in reduction slots 11:13.
+    pending_last_gap::Bool
+
+    # Snapshot of sigma used when enqueuing pending last-gap terms.
+    pending_last_gap_sigma::Float64
+
+    # Snapshot of lambda_max used when enqueuing pending last-gap terms.
+    pending_last_gap_lambda_max::Float64
 
     # Default constructor
     HPRLP_workspace_gpu() = new()
