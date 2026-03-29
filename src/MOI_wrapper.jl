@@ -118,7 +118,6 @@ const SUPPORTED_PARAMETERS = (
     "use_Pock_Chambolle_scaling",
     "use_bc_scaling",
     "use_gpu",
-    "CUSPARSE_spmv",
     "device_number",
     "warm_up",
     "print_frequency",
@@ -147,8 +146,6 @@ function MOI.set(model::Optimizer, param::MOI.RawOptimizerAttribute, value)
         model.params.use_bc_scaling = Bool(value)
     elseif name == "use_gpu"
         model.params.use_gpu = Bool(value)
-    elseif name == "CUSPARSE_spmv"
-        model.params.CUSPARSE_spmv = Bool(value)
     elseif name == "device_number"
         model.params.device_number = Int(value)
     elseif name == "warm_up"
@@ -181,8 +178,6 @@ function MOI.get(model::Optimizer, param::MOI.RawOptimizerAttribute)
         return model.params.use_bc_scaling
     elseif name == "use_gpu"
         return model.params.use_gpu
-    elseif name == "CUSPARSE_spmv"
-        return model.params.CUSPARSE_spmv
     elseif name == "device_number"
         return model.params.device_number
     elseif name == "warm_up"

@@ -25,10 +25,10 @@ Parameters for the HPR-LP solver.
 - `use_Pock_Chambolle_scaling::Bool`: Enable Pock-Chambolle scaling (default: true)
 - `use_bc_scaling::Bool`: Enable b/c scaling (default: true)
 - `use_gpu::Bool`: Use GPU acceleration (default: true)
-- `CUSPARSE_spmv::Bool`: Force cuSPARSE-only SpMV path (disable fused autotune) (default: false)
 - `device_number::Int`: GPU device number (default: 0)
 - `warm_up::Bool`: Enable warm-up phase (default: true)
 - `print_frequency::Int`: Print log every N iterations, -1 for auto (default: -1)
+- `log_iterations::Bool`: Print the iteration table without enabling full verbose banners (default: false)
 - `verbose::Bool`: Enable verbose output (default: true)
 - `autotune_verbose::Bool`: Enable deterministic GPU autotune logging (default: false)
 - `initial_x::Union{Vector{Float64},Nothing}`: Initial primal solution (default: nothing)
@@ -42,6 +42,7 @@ params = HPRLP_parameters()
 params.stoptol = 1e-6
 params.use_gpu = false
 params.verbose = false
+params.autotune_verbose = false
 params.auto_save = true
 params.save_filename = "my_optimization.h5"
 # Provide initial point
@@ -74,9 +75,6 @@ mutable struct HPRLP_parameters
     # use GPU or not, default is true
     use_gpu::Bool
 
-    # force cuSPARSE-only SpMV path (disable fused autotune), default is false
-    CUSPARSE_spmv::Bool
-
     # GPU device number, default is 0
     device_number::Int
 
@@ -85,6 +83,9 @@ mutable struct HPRLP_parameters
 
     # print frequency, print the log every print_frequency iterations, default is -1 (auto)
     print_frequency::Int
+
+    # whether to print the iteration log table, default is false
+    log_iterations::Bool
 
     # whether to print verbose output, default is true
     verbose::Bool
@@ -105,7 +106,7 @@ mutable struct HPRLP_parameters
     save_filename::String
 
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5")
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, 0, true, -1, false, true, false, nothing, nothing, false, "hprlp_autosave.h5")
 end
 
 """
@@ -231,31 +232,31 @@ end
 mutable struct HPRLP_saved_state_gpu
     # Best x found so far (GPU)
     save_x::CuVector{Float64}
-    
+
     # Best y found so far (GPU)
     save_y::CuVector{Float64}
-    
+
     # Best sigma value
     save_sigma::Float64
-    
+
     # Iteration when best state was saved
     save_iter::Int
-    
+
     # Primal residual at best state
     save_err_Rp::Float64
-    
+
     # Dual residual at best state
     save_err_Rd::Float64
-    
+
     # Primal objective at best state
     save_primal_obj::Float64
-    
+
     # Dual objective at best state
     save_dual_obj::Float64
-    
+
     # Relative gap at best state
     save_rel_gap::Float64
-    
+
     # Default constructor
     HPRLP_saved_state_gpu() = new()
 end
@@ -263,31 +264,31 @@ end
 mutable struct HPRLP_saved_state_cpu
     # Best x found so far (CPU)
     save_x::Vector{Float64}
-    
+
     # Best y found so far (CPU)
     save_y::Vector{Float64}
-    
+
     # Best sigma value
     save_sigma::Float64
-    
+
     # Iteration when best state was saved
     save_iter::Int
-    
+
     # Primal residual at best state
     save_err_Rp::Float64
-    
+
     # Dual residual at best state
     save_err_Rd::Float64
-    
+
     # Primal objective at best state
     save_primal_obj::Float64
-    
+
     # Dual objective at best state
     save_dual_obj::Float64
-    
+
     # Relative gap at best state
     save_rel_gap::Float64
-    
+
     # Default constructor
     HPRLP_saved_state_cpu() = new()
 end
@@ -383,41 +384,48 @@ mutable struct HPRLP_workspace_gpu
 
     # Whether to use the experimental deterministic fused CSR normal-update path.
     use_custom_deterministic_fused::Bool
-
-    # Whether to use custom fused x_z normal update (otherwise cuSPARSE path).
+    # Whether to use custom fused x_z normal update (otherwise deterministic cuSPARSE path).
     use_custom_fused_x::Bool
-
-    # Whether to use custom fused y normal update (otherwise cuSPARSE path).
+    # Whether to keep custom fused y-update enabled (default false for hybrid deterministic speed path).
     use_custom_fused_y::Bool
 
     # Precomputed bound classes (0: free, 1: lower-only, 2: upper-only, 3: boxed).
     x_bound_type::CuVector{UInt8}
     y_bound_type::CuVector{UInt8}
 
-    # Row buckets for custom fused CSR kernels.
+    # Row buckets for custom deterministic fused CSR kernels.
     A_rows_short::CuVector{Int32}
     A_rows_medium::CuVector{Int32}
+    A_rows_long::CuVector{Int32}
     AT_rows_short::CuVector{Int32}
     AT_rows_medium::CuVector{Int32}
+    AT_rows_long::CuVector{Int32}
+
+    # Scratch buffer for segmented partial sums in fused long-row y updates.
+    A_long_partial::CuVector{Float64}
+
 
     # Normally used to indicate whether the termination conditions should be checked
     to_check::Bool
 
     # Saved state for auto_save feature
     saved_state::HPRLP_saved_state_gpu
-    
+
     # Flag to indicate if backup file has been created in this session
     backup_created::Bool
 
-    # Dynamic scalar parameters for GPU kernels:
+    # Dynamic scalar parameters for CUDA Graph kernels:
     # [sigma, lambda_max*sigma, 1/(lambda_max*sigma), 1/sigma]
     Halpern_params::CuVector{Float64}
 
-    # Device-side mirror of restart_info.inner for Halpern updates.
+    # Device-side mirror of restart_info.inner for Halpern fact1/fact2.
     halpern_inner::CuVector{Int64}
 
     # Device-side Halpern factors [fact1, fact2], updated every iteration.
     halpern_factors::CuVector{Float64}
+
+    # Device-side completion counter used by standard y-update kernels.
+    halpern_block_counter::CuVector{Int32}
 
     # Reusable device reduction outputs (dot/norm) to batch host readbacks.
     reduction_scalars::CuVector{Float64}
@@ -559,6 +567,13 @@ mutable struct LP_info_gpu
     l::CuVector{Float64}
     u::CuVector{Float64}
     obj_constant::Float64
+end
+
+struct GPUWarmupCache
+    key::UInt64
+    lambda_max::Float64
+    use_custom_fused_x::Bool
+    use_custom_fused_y::Bool
 end
 
 # the space for the scaling information on the CPU

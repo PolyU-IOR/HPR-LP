@@ -116,10 +116,10 @@ function scaling!(lp::LP_info_cpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_sc
     scaling_info.row_norm = row_norm
     scaling_info.col_norm = col_norm
 
-    lp.AL[lp.AL .== -Inf] .= -1.0e100
-    lp.AU[lp.AU .== Inf] .= 1.0e100
-    lp.l[lp.l .== -Inf] .= -1.0e100
-    lp.u[lp.u .== Inf] .= 1.0e100
+    lp.AL[lp.AL.==-Inf] .= -1.0e100
+    lp.AU[lp.AU.==Inf] .= 1.0e100
+    lp.l[lp.l.==-Inf] .= -1.0e100
+    lp.u[lp.u.==Inf] .= 1.0e100
     return scaling_info
 end
 
@@ -331,10 +331,10 @@ function scaling_gpu!(lp::LP_info_gpu, use_Ruiz_scaling::Bool, use_Pock_Chamboll
     scaling_info.row_norm = row_norm
     scaling_info.col_norm = col_norm
 
-    lp.AL[lp.AL .== -Inf] .= -1.0e100
-    lp.AU[lp.AU .== Inf] .= 1.0e100
-    lp.l[lp.l .== -Inf] .= -1.0e100
-    lp.u[lp.u .== Inf] .= 1.0e100
+    lp.AL[lp.AL.==-Inf] .= -1.0e100
+    lp.AU[lp.AU.==Inf] .= 1.0e100
+    lp.l[lp.l.==-Inf] .= -1.0e100
+    lp.u[lp.u.==Inf] .= 1.0e100
 
     return scaling_info
 end
@@ -396,7 +396,7 @@ function power_iteration_gpu(
 
     println("Power iteration did not converge within the specified tolerance.")
     println("The maximum iteration is ", max_iterations, " and the error is ", error)
-    
+
     copyto!(ws.y, ws.dy)
     return lambda_max
 end
@@ -458,6 +458,31 @@ function validate_gpu_parameters!(params::HPRLP_parameters)
             return
         end
     end
+end
+
+"""
+    configure_default_fast_selector_env!(env=ENV)
+
+Install the fast deterministic fused-selector defaults for script-style runs
+without overriding caller-provided values.
+
+# Arguments
+- `env`: Environment-like dictionary, defaults to `ENV`
+
+# Returns
+- Named tuple with the effective selector configuration
+"""
+function configure_default_fast_selector_env!(env=ENV)
+    haskey(env, "HPRLP_CUSTOM_CSR_ALG2") || (env["HPRLP_CUSTOM_CSR_ALG2"] = "1")
+    haskey(env, "HPRLP_CUSTOM_CSR_ALG2_STRICT_MATCH") || (env["HPRLP_CUSTOM_CSR_ALG2_STRICT_MATCH"] = "0")
+    haskey(env, "HPRLP_CUSTOM_CSR_ALG2_FUSE_X") || (env["HPRLP_CUSTOM_CSR_ALG2_FUSE_X"] = "auto")
+    haskey(env, "HPRLP_CUSTOM_CSR_ALG2_FUSE_Y") || (env["HPRLP_CUSTOM_CSR_ALG2_FUSE_Y"] = "auto")
+    return (
+        custom_csr_alg2 = env["HPRLP_CUSTOM_CSR_ALG2"],
+        strict_match = env["HPRLP_CUSTOM_CSR_ALG2_STRICT_MATCH"],
+        fuse_x = env["HPRLP_CUSTOM_CSR_ALG2_FUSE_X"],
+        fuse_y = env["HPRLP_CUSTOM_CSR_ALG2_FUSE_Y"],
+    )
 end
 
 """
@@ -545,7 +570,7 @@ result = optimize(model, params)
 
 See also: [`build_from_mps`](@ref), [`optimize`](@ref)
 """
-function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
+function build_from_Abc(A::Union{SparseMatrixCSC,Matrix},
     c::Vector{Float64},
     AL::Vector{Float64},
     AU::Vector{Float64},

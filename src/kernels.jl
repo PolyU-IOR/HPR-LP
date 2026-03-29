@@ -108,6 +108,21 @@ end
     end
 end
 
+@inline function warp_reduce_sum(v::Float64)
+    v += CUDA.shfl_down_sync(CUDA.FULL_MASK, v, 16)
+    v += CUDA.shfl_down_sync(CUDA.FULL_MASK, v, 8)
+    v += CUDA.shfl_down_sync(CUDA.FULL_MASK, v, 4)
+    v += CUDA.shfl_down_sync(CUDA.FULL_MASK, v, 2)
+    v += CUDA.shfl_down_sync(CUDA.FULL_MASK, v, 1)
+    return v
+end
+
+@inline fused_y_long_segments() = Int32(16)
+
+@inline function fused_y_long_partial_length(n_long::Integer; segments::Int32=fused_y_long_segments())
+    return Int(n_long) * Int(segments)
+end
+
 function fused_update_x_z_rows_short_kernel!(
     x::CuDeviceVector{Float64},
     x_hat::CuDeviceVector{Float64},
@@ -194,6 +209,65 @@ function fused_update_x_z_rows_warp_kernel!(
                 xhat = 2 * xbar - xi
                 x[row] = muladd(fact2, xhat, fact1 * x0[row])
                 x_hat[row] = xhat
+            end
+        end
+    end
+    return
+end
+
+function fused_update_x_z_rows_block_kernel!(
+    x::CuDeviceVector{Float64},
+    x_hat::CuDeviceVector{Float64},
+    l::CuDeviceVector{Float64},
+    u::CuDeviceVector{Float64},
+    x_bound_type::CuDeviceVector{UInt8},
+    c::CuDeviceVector{Float64},
+    x0::CuDeviceVector{Float64},
+    y::CuDeviceVector{Float64},
+    AT_rowPtr::CuDeviceVector{Int32},
+    AT_colVal::CuDeviceVector{Int32},
+    AT_nzVal::CuDeviceVector{Float64},
+    sigma_params::CuDeviceVector{Float64,1},
+    halpern_factors::CuDeviceVector{Float64,1},
+    row_ids::CuDeviceVector{Int32},
+    nrows::Int)
+
+    row_idx = Int(blockIdx().x)
+    if row_idx <= nrows
+        row = Int(row_ids[row_idx])
+        tid = Int(threadIdx().x)
+        stride = Int(blockDim().x)
+        local_warp, lane = fldmod1(threadIdx().x, Int32(32))
+        warps_per_block = blockDim().x ÷ Int32(32)
+        sigma = sigma_params[1]
+        acc = 0.0
+        @inbounds begin
+            start_idx = Int(AT_rowPtr[row])
+            end_idx = Int(AT_rowPtr[row+1]) - 1
+            for k in (start_idx + tid - 1):stride:end_idx
+                acc = muladd(AT_nzVal[k], y[AT_colVal[k]], acc)
+            end
+
+            acc = warp_reduce_sum(acc)
+            smem = CUDA.@cuDynamicSharedMem(Float64, Int(warps_per_block))
+            if lane == 1
+                smem[Int(local_warp)] = acc
+            end
+            sync_threads()
+
+            if local_warp == 1
+                block_sum = lane <= warps_per_block ? smem[Int(lane)] : 0.0
+                block_sum = warp_reduce_sum(block_sum)
+                if lane == 1
+                    fact1 = halpern_factors[1]
+                    fact2 = halpern_factors[2]
+                    xi = x[row]
+                    z_temp = muladd(sigma, block_sum - c[row], xi)
+                    xbar = project_x_with_bounds(z_temp, l[row], u[row], x_bound_type[row])
+                    xhat = 2 * xbar - xi
+                    x[row] = muladd(fact2, xhat, fact1 * x0[row])
+                    x_hat[row] = xhat
+                end
             end
         end
     end
@@ -288,6 +362,153 @@ function fused_update_y_rows_warp_kernel!(
     return
 end
 
+function fused_update_y_rows_block_kernel!(
+    y::CuDeviceVector{Float64},
+    AL::CuDeviceVector{Float64},
+    AU::CuDeviceVector{Float64},
+    y_bound_type::CuDeviceVector{UInt8},
+    y0::CuDeviceVector{Float64},
+    x_hat::CuDeviceVector{Float64},
+    A_rowPtr::CuDeviceVector{Int32},
+    A_colVal::CuDeviceVector{Int32},
+    A_nzVal::CuDeviceVector{Float64},
+    sigma_params::CuDeviceVector{Float64,1},
+    halpern_factors::CuDeviceVector{Float64,1},
+    row_ids::CuDeviceVector{Int32},
+    nrows::Int)
+
+    row_idx = Int(blockIdx().x)
+    if row_idx <= nrows
+        row = Int(row_ids[row_idx])
+        tid = Int(threadIdx().x)
+        stride = Int(blockDim().x)
+        local_warp, lane = fldmod1(threadIdx().x, Int32(32))
+        warps_per_block = blockDim().x ÷ Int32(32)
+        fact1 = sigma_params[2]
+        fact2 = sigma_params[3]
+        acc = 0.0
+        @inbounds begin
+            start_idx = Int(A_rowPtr[row])
+            end_idx = Int(A_rowPtr[row+1]) - 1
+            for k in (start_idx + tid - 1):stride:end_idx
+                acc = muladd(A_nzVal[k], x_hat[A_colVal[k]], acc)
+            end
+
+            acc = warp_reduce_sum(acc)
+            smem = CUDA.@cuDynamicSharedMem(Float64, Int(warps_per_block))
+            if lane == 1
+                smem[Int(local_warp)] = acc
+            end
+            sync_threads()
+
+            if local_warp == 1
+                block_sum = lane <= warps_per_block ? smem[Int(lane)] : 0.0
+                block_sum = warp_reduce_sum(block_sum)
+                if lane == 1
+                    Halpern_fact1 = halpern_factors[1]
+                    Halpern_fact2 = halpern_factors[2]
+                    yi = y[row]
+                    v = muladd(-fact1, yi, block_sum)
+                    d = project_y_delta(v, AL[row], AU[row], y_bound_type[row])
+                    yb = fact2 * d
+                    y[row] = muladd(Halpern_fact2, 2 * yb - yi, Halpern_fact1 * y0[row])
+                end
+            end
+        end
+    end
+    return
+end
+
+function fused_update_y_rows_long_segment_kernel!(
+    x_hat::CuDeviceVector{Float64},
+    A_rowPtr::CuDeviceVector{Int32},
+    A_colVal::CuDeviceVector{Int32},
+    A_nzVal::CuDeviceVector{Float64},
+    row_ids::CuDeviceVector{Int32},
+    nrows::Int,
+    segments::Int32,
+    partial::CuDeviceVector{Float64})
+
+    block = Int(blockIdx().x) - 1
+    segs = Int(segments)
+    row_slot = (block ÷ segs) + 1
+    if row_slot <= nrows
+        seg_slot = (block % segs) + 1
+        row = Int(row_ids[row_slot])
+        tid = Int(threadIdx().x)
+        stride = Int(blockDim().x)
+        local_warp, lane = fldmod1(threadIdx().x, Int32(32))
+        warps_per_block = blockDim().x ÷ Int32(32)
+        acc = 0.0
+        @inbounds begin
+            start_idx = Int(A_rowPtr[row])
+            end_idx = Int(A_rowPtr[row+1]) - 1
+            nnz_i = end_idx - start_idx + 1
+            chunk = cld(nnz_i, segs)
+            seg_start = start_idx + (seg_slot - 1) * chunk
+            seg_end = min(end_idx, seg_start + chunk - 1)
+            if seg_start <= seg_end
+                for k in (seg_start + tid - 1):stride:seg_end
+                    acc = muladd(A_nzVal[k], x_hat[A_colVal[k]], acc)
+                end
+            end
+
+            acc = warp_reduce_sum(acc)
+            smem = CUDA.@cuDynamicSharedMem(Float64, Int(warps_per_block))
+            if lane == 1
+                smem[Int(local_warp)] = acc
+            end
+            sync_threads()
+
+            if local_warp == 1
+                block_sum = lane <= warps_per_block ? smem[Int(lane)] : 0.0
+                block_sum = warp_reduce_sum(block_sum)
+                if lane == 1
+                    partial[(row_slot - 1) * segs + seg_slot] = block_sum
+                end
+            end
+        end
+    end
+    return
+end
+
+function fused_update_y_rows_long_finalize_kernel!(
+    y::CuDeviceVector{Float64},
+    AL::CuDeviceVector{Float64},
+    AU::CuDeviceVector{Float64},
+    y_bound_type::CuDeviceVector{UInt8},
+    y0::CuDeviceVector{Float64},
+    sigma_params::CuDeviceVector{Float64,1},
+    halpern_factors::CuDeviceVector{Float64,1},
+    row_ids::CuDeviceVector{Int32},
+    nrows::Int,
+    segments::Int32,
+    partial::CuDeviceVector{Float64})
+
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= nrows
+        row = Int(row_ids[i])
+        segs = Int(segments)
+        fact1 = sigma_params[2]
+        fact2 = sigma_params[3]
+        @inbounds begin
+            acc = 0.0
+            base = (i - 1) * segs
+            for s in 1:segs
+                acc += partial[base + s]
+            end
+            Halpern_fact1 = halpern_factors[1]
+            Halpern_fact2 = halpern_factors[2]
+            yi = y[row]
+            v = muladd(-fact1, yi, acc)
+            d = project_y_delta(v, AL[row], AU[row], y_bound_type[row])
+            yb = fact2 * d
+            y[row] = muladd(Halpern_fact2, 2 * yb - yi, Halpern_fact1 * y0[row])
+        end
+    end
+    return
+end
+
 function advance_halpern_factors_kernel!(
     halpern_inner::CuDeviceVector{Int64,1},
     halpern_factors::CuDeviceVector{Float64,1})
@@ -309,6 +530,7 @@ function update_x_z_normal_fused_bucket_gpu!(ws::HPRLP_workspace_gpu)
     AT_nzVal = ws.AT.nzVal
     n_short = length(ws.AT_rows_short)
     n_medium = length(ws.AT_rows_medium)
+    n_long = length(ws.AT_rows_long)
     if n_short > 0
         @cuda threads = 512 blocks = cld(n_short, 512) fused_update_x_z_rows_short_kernel!(
             ws.x, ws.x_hat, ws.l, ws.u, ws.x_bound_type, ws.c, ws.last_x, ws.y,
@@ -321,6 +543,12 @@ function update_x_z_normal_fused_bucket_gpu!(ws::HPRLP_workspace_gpu)
             AT_rowPtr, AT_colVal, AT_nzVal, ws.Halpern_params, ws.halpern_factors,
             ws.AT_rows_medium, n_medium)
     end
+    if n_long > 0
+        @cuda threads = 1024 blocks = n_long shmem = 32 * sizeof(Float64) fused_update_x_z_rows_block_kernel!(
+            ws.x, ws.x_hat, ws.l, ws.u, ws.x_bound_type, ws.c, ws.last_x, ws.y,
+            AT_rowPtr, AT_colVal, AT_nzVal, ws.Halpern_params, ws.halpern_factors,
+            ws.AT_rows_long, n_long)
+    end
     return
 end
 
@@ -330,6 +558,8 @@ function update_y_normal_fused_bucket_gpu!(ws::HPRLP_workspace_gpu)
     A_nzVal = ws.A.nzVal
     n_short = length(ws.A_rows_short)
     n_medium = length(ws.A_rows_medium)
+    n_long = length(ws.A_rows_long)
+    long_partial = ws.A_long_partial
     if n_short > 0
         @cuda threads = 512 blocks = cld(n_short, 512) fused_update_y_rows_short_kernel!(
             ws.y, ws.AL, ws.AU, ws.y_bound_type, ws.last_y, ws.x_hat,
@@ -341,6 +571,14 @@ function update_y_normal_fused_bucket_gpu!(ws::HPRLP_workspace_gpu)
             ws.y, ws.AL, ws.AU, ws.y_bound_type, ws.last_y, ws.x_hat,
             A_rowPtr, A_colVal, A_nzVal, ws.Halpern_params, ws.halpern_factors,
             ws.A_rows_medium, n_medium)
+    end
+    if n_long > 0
+        long_segments = fused_y_long_segments()
+        @cuda threads = 256 blocks = n_long * Int(long_segments) shmem = 8 * sizeof(Float64) fused_update_y_rows_long_segment_kernel!(
+            ws.x_hat, A_rowPtr, A_colVal, A_nzVal, ws.A_rows_long, n_long, long_segments, long_partial)
+        @cuda threads = 256 blocks = cld(n_long, 256) fused_update_y_rows_long_finalize_kernel!(
+            ws.y, ws.AL, ws.AU, ws.y_bound_type, ws.last_y, ws.Halpern_params, ws.halpern_factors,
+            ws.A_rows_long, n_long, long_segments, long_partial)
     end
     @cuda threads = 1 blocks = 1 advance_halpern_factors_kernel!(ws.halpern_inner, ws.halpern_factors)
     return

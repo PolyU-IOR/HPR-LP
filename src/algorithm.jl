@@ -421,6 +421,7 @@ function check_restart(restart_info::HPRLP_restart,
     iter::Int,
     check_iter::Int, sigma::Float64,
 )
+
     # adaptive restart
     if restart_info.first_restart
         if iter == check_iter
@@ -620,13 +621,146 @@ function prepare_spmv!(A::CuSparseMatrixCSR{Float64,Int32}, AT::CuSparseMatrixCS
     return spmv_A, spmv_AT
 end
 
+@inline function build_csr_row_buckets(row_ptr::CuVector{Int32}; short_max::Int32=Int32(16), medium_max::Int32=Int32(128))
+    row_ptr_h = Vector(row_ptr)
+    nrows = length(row_ptr_h) - 1
+    rows_short = Int32[]
+    rows_medium = Int32[]
+    rows_long = Int32[]
+    sizehint!(rows_short, nrows)
+    sizehint!(rows_medium, nrows ÷ 2)
+    sizehint!(rows_long, nrows ÷ 8)
+    @inbounds for i in 1:nrows
+        nnz_i = row_ptr_h[i+1] - row_ptr_h[i]
+        if nnz_i <= short_max
+            push!(rows_short, Int32(i))
+        elseif nnz_i <= medium_max
+            push!(rows_medium, Int32(i))
+        else
+            push!(rows_long, Int32(i))
+        end
+    end
+    return CuArray(rows_short), CuArray(rows_medium), CuArray(rows_long)
+end
+
+@inline function choose_custom_fused_backend(
+    row_ptr::AbstractVector{Int32},
+    rows_long::AbstractVector{Int32};
+    long_nnz_ratio_cutoff::Float64=0.35,
+    long_row_ratio_cutoff::Float64=0.10)
+    row_ptr_h = Vector(row_ptr)
+    nrows = length(row_ptr_h) - 1
+    total_nnz = Int(row_ptr_h[end] - row_ptr_h[1])
+    if nrows <= 0 || total_nnz <= 0
+        return true
+    end
+    rows_long_h = Vector(rows_long)
+    n_long = length(rows_long_h)
+    if n_long == 0
+        return true
+    end
+    long_nnz = 0
+    @inbounds for r in rows_long_h
+        i = Int(r)
+        long_nnz += Int(row_ptr_h[i+1] - row_ptr_h[i])
+    end
+    long_nnz_ratio = long_nnz / total_nnz
+    long_row_ratio = n_long / nrows
+    # cuSPARSE is typically better when very few rows carry a large nnz share.
+    return !(long_nnz_ratio > long_nnz_ratio_cutoff && long_row_ratio < long_row_ratio_cutoff)
+end
+
+@inline function choose_custom_fused_x_backend(
+    row_ptr::AbstractVector{Int32},
+    rows_long::AbstractVector{Int32})
+    # x_z update uses AT * y; AT often has short rows where fused custom is strong.
+    return choose_custom_fused_backend(
+        row_ptr, rows_long;
+        long_nnz_ratio_cutoff=0.50,
+        long_row_ratio_cutoff=0.08)
+end
+
+@inline function choose_custom_fused_y_backend(
+    row_ptr::AbstractVector{Int32},
+    rows_long::AbstractVector{Int32})
+    # y update uses A * x_hat; heavy row skew tends to favor cuSPARSE merge kernels.
+    return choose_custom_fused_backend(
+        row_ptr, rows_long;
+        long_nnz_ratio_cutoff=0.35,
+        long_row_ratio_cutoff=0.10)
+end
+
+@inline function normalize_custom_backend_mode(mode::AbstractString)
+    lowered = lowercase(mode)
+    if lowered in ("1", "true", "on")
+        return :on
+    elseif lowered in ("0", "false", "off")
+        return :off
+    end
+    return :auto
+end
+
 @inline deterministic_probe_iterations() = 150
 
-@inline function deterministic_probe_candidates()
-    candidates = [(use_x=false, use_y=false)]
-    push!(candidates, (use_x=true, use_y=false))
-    push!(candidates, (use_x=false, use_y=true))
-    push!(candidates, (use_x=true, use_y=true))
+@inline function gpu_backend_env_signature(env=ENV)
+    return (
+        custom_csr_alg2 = get(env, "HPRLP_CUSTOM_CSR_ALG2", "0"),
+        strict_match = get(env, "HPRLP_CUSTOM_CSR_ALG2_STRICT_MATCH", "1"),
+        fuse_x = get(env, "HPRLP_CUSTOM_CSR_ALG2_FUSE_X", "auto"),
+        fuse_y = get(env, "HPRLP_CUSTOM_CSR_ALG2_FUSE_Y", "auto"),
+        autotune = get(env, "HPRLP_CUSTOM_CSR_ALG2_AUTOTUNE", "1"),
+    )
+end
+
+@inline function gpu_warmup_cache_supported(params::HPRLP_parameters)
+    return params.use_gpu && min(params.max_iter, deterministic_probe_iterations()) == deterministic_probe_iterations()
+end
+
+@inline function gpu_warmup_cache_key(model::LP_info_cpu, params::HPRLP_parameters; env=ENV)
+    h = hash(size(model.A))
+    h = hash(nnz(model.A), h)
+    h = hash(model.A.colptr, h)
+    h = hash(model.A.rowval, h)
+    h = hash(model.A.nzval, h)
+    h = hash(model.c, h)
+    h = hash(model.AL, h)
+    h = hash(model.AU, h)
+    h = hash(model.l, h)
+    h = hash(model.u, h)
+    h = hash(model.obj_constant, h)
+    h = hash(params.device_number, h)
+    h = hash(params.use_Ruiz_scaling, h)
+    h = hash(params.use_Pock_Chambolle_scaling, h)
+    h = hash(params.use_bc_scaling, h)
+    h = hash(gpu_backend_env_signature(env), h)
+    h = hash(min(params.max_iter, deterministic_probe_iterations()), h)
+    return UInt64(h)
+end
+
+@inline function gpu_warmup_cache_matches(cache::GPUWarmupCache, model::LP_info_cpu, params::HPRLP_parameters; env=ENV)
+    return gpu_warmup_cache_supported(params) && cache.key == gpu_warmup_cache_key(model, params; env=env)
+end
+
+@inline function apply_gpu_warmup_cache!(ws::HPRLP_workspace_gpu, cache::GPUWarmupCache)
+    ws.lambda_max = cache.lambda_max
+    ws.use_custom_fused_x = cache.use_custom_fused_x
+    ws.use_custom_fused_y = cache.use_custom_fused_y
+    return nothing
+end
+
+@inline function deterministic_probe_candidates(
+    fuse_x_mode::Symbol=:auto,
+    fuse_y_mode::Symbol=:auto)
+    candidates = [(use_x = false, use_y = false)]
+    if fuse_x_mode == :auto
+        push!(candidates, (use_x = true, use_y = false))
+    end
+    if fuse_y_mode == :auto
+        push!(candidates, (use_x = false, use_y = true))
+    end
+    if fuse_x_mode == :auto && fuse_y_mode == :auto
+        push!(candidates, (use_x = true, use_y = true))
+    end
     return candidates
 end
 
@@ -639,12 +773,12 @@ end
     speedup_margin::Float64=0.05)
 
     if !isfinite(ref_metric) || ref_time_ns <= 0
-        return (use_x=false, use_y=false, reason=:default_cusparse)
+        return (use_x = false, use_y = false, reason = :default_cusparse)
     end
 
     allowed_metric = ref_metric + max(quality_abs_tol, abs(ref_metric) * quality_rel_tol)
     ref_time = Float64(ref_time_ns)
-    best_choice = (use_x=false, use_y=false, reason=:default_cusparse)
+    best_choice = (use_x = false, use_y = false, reason = :default_cusparse)
     best_time = typemax(Float64)
     for candidate in candidate_results
         candidate_metric = candidate.metric
@@ -657,28 +791,10 @@ end
         end
         if candidate_time <= ref_time * (1.0 - speedup_margin) && candidate_time < best_time
             best_time = candidate_time
-            best_choice = (use_x=candidate.use_x, use_y=candidate.use_y, reason=:speed)
+            best_choice = (use_x = candidate.use_x, use_y = candidate.use_y, reason = :speed)
         end
     end
     return best_choice
-end
-
-@inline function build_csr_row_buckets(row_ptr::CuVector{Int32}; short_max::Int32=Int32(16))
-    row_ptr_h = Vector(row_ptr)
-    nrows = length(row_ptr_h) - 1
-    rows_short = Int32[]
-    rows_medium = Int32[]
-    sizehint!(rows_short, nrows)
-    sizehint!(rows_medium, nrows ÷ 2)
-    @inbounds for i in 1:nrows
-        nnz_i = row_ptr_h[i+1] - row_ptr_h[i]
-        if nnz_i <= short_max
-            push!(rows_short, Int32(i))
-        else
-            push!(rows_medium, Int32(i))
-        end
-    end
-    return CuArray(rows_short), CuArray(rows_medium)
 end
 
 # the function to allocate the workspace for the HPR-LP algorithm
@@ -710,11 +826,14 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     ws.Ax = CUDA.zeros(Float64, m)
     ws.last_x = CUDA.zeros(Float64, n)
     ws.last_y = CUDA.zeros(Float64, m)
-    ws.use_custom_deterministic_fused = !params.CUSPARSE_spmv
+    custom_requested = get(ENV, "HPRLP_CUSTOM_CSR_ALG2", "0") == "1"
+    strict_match = lowercase(get(ENV, "HPRLP_CUSTOM_CSR_ALG2_STRICT_MATCH", "1")) in ("1", "true", "on")
+    ws.use_custom_deterministic_fused = custom_requested && !strict_match
     ws.use_custom_fused_x = false
     ws.use_custom_fused_y = false
     ws.x_bound_type = CuArray(UInt8[])
     ws.y_bound_type = CuArray(UInt8[])
+    ws.A_long_partial = CUDA.zeros(Float64, 0)
     ws.to_check = false
     ws.spmv_A, ws.spmv_AT = prepare_spmv!(lp.A, lp.AT, ws.x_bar, ws.x_hat, ws.dx, ws.Ax,
         ws.y_bar, ws.y, ws.ATy)
@@ -732,15 +851,32 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
         @. ws.y_bound_type = ifelse((ws.AL <= -1e90) & (ws.AU >= 1e90), UInt8(0),
             ifelse(ws.AU >= 1e90, UInt8(1), ifelse(ws.AL <= -1e90, UInt8(2), UInt8(3))))
 
-        ws.A_rows_short, ws.A_rows_medium =
-            build_csr_row_buckets(lp.A.rowPtr; short_max=Int32(16))
-        ws.AT_rows_short, ws.AT_rows_medium =
-            build_csr_row_buckets(lp.AT.rowPtr; short_max=Int32(16))
+        ws.A_rows_short, ws.A_rows_medium, ws.A_rows_long =
+            build_csr_row_buckets(lp.A.rowPtr; short_max=Int32(16), medium_max=Int32(128))
+        ws.AT_rows_short, ws.AT_rows_medium, ws.AT_rows_long =
+            build_csr_row_buckets(lp.AT.rowPtr; short_max=Int32(16), medium_max=Int32(128))
+        ws.A_long_partial = CUDA.zeros(Float64, fused_y_long_partial_length(length(ws.A_rows_long)))
+        fuse_x_mode = normalize_custom_backend_mode(get(ENV, "HPRLP_CUSTOM_CSR_ALG2_FUSE_X", "auto"))
+        if fuse_x_mode == :on
+            ws.use_custom_fused_x = true
+        else
+            ws.use_custom_fused_x = false
+        end
+
+        fuse_y_mode = normalize_custom_backend_mode(get(ENV, "HPRLP_CUSTOM_CSR_ALG2_FUSE_Y", "auto"))
+        if fuse_y_mode == :on
+            ws.use_custom_fused_y = true
+        else
+            ws.use_custom_fused_y = false
+        end
     else
         ws.A_rows_short = CuArray(Int32[])
         ws.A_rows_medium = CuArray(Int32[])
+        ws.A_rows_long = CuArray(Int32[])
         ws.AT_rows_short = CuArray(Int32[])
         ws.AT_rows_medium = CuArray(Int32[])
+        ws.AT_rows_long = CuArray(Int32[])
+        ws.A_long_partial = CUDA.zeros(Float64, 0)
     end
 
     # Initialize with user-provided initial x if available
@@ -793,9 +929,11 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     # Initialize backup flag
     ws.backup_created = false
 
+    # [sigma, lambda_max*sigma, 1/(lambda_max*sigma), 1/sigma].
     ws.Halpern_params = CUDA.zeros(Float64, 4)
     ws.halpern_inner = CUDA.zeros(Int64, 1)
     ws.halpern_factors = CuArray([0.5, 0.5])
+    ws.halpern_block_counter = CUDA.zeros(Int32, 1)
     ws.reduction_scalars = CUDA.zeros(Float64, 13)
     ws.reduction_scalars_host = CUDA.pin(Vector{Float64}(undef, 13))
     ws.pending_last_gap = false
@@ -969,11 +1107,12 @@ function save_state_to_hdf5(
         file["parameters/use_Pock_Chambolle_scaling"] = params.use_Pock_Chambolle_scaling
         file["parameters/use_bc_scaling"] = params.use_bc_scaling
         file["parameters/use_gpu"] = params.use_gpu
-        file["parameters/CUSPARSE_spmv"] = params.CUSPARSE_spmv
         file["parameters/device_number"] = params.device_number
         file["parameters/warm_up"] = params.warm_up
         file["parameters/print_frequency"] = params.print_frequency
+        file["parameters/log_iterations"] = params.log_iterations
         file["parameters/verbose"] = params.verbose
+        file["parameters/autotune_verbose"] = params.autotune_verbose
         file["parameters/auto_save"] = params.auto_save
 
         # Save initial solutions if provided
@@ -1088,11 +1227,12 @@ function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu
     println("  Time limit: ", params.time_limit, " seconds")
     println("  Check interval: ", params.check_iter)
     println("  Print frequency: ", params.print_frequency == -1 ? "Adaptive" : params.print_frequency)
+    println("  Iteration log: ", iteration_logging_enabled(params.verbose; log_iterations=params.log_iterations) ? "Enabled" : "Disabled")
+    println("  Autotune log: ", params.autotune_verbose ? "Enabled" : "Disabled")
     println("  Scaling options:")
     println("    Ruiz scaling: ", params.use_Ruiz_scaling ? "Enabled" : "Disabled")
     println("    Pock-Chambolle scaling: ", params.use_Pock_Chambolle_scaling ? "Enabled" : "Disabled")
     println("    b/c scaling: ", params.use_bc_scaling ? "Enabled" : "Disabled")
-    println("  CUSPARSE_spmv: ", params.CUSPARSE_spmv ? "Enabled (force cuSPARSE, no autotune)" : "Disabled")
 
     if params.warm_up
         println("  Warm-up: Enabled (avoids JIT compilation overhead)")
@@ -1171,77 +1311,34 @@ end
     return
 end
 
-@inline function upload_halpern_iter_params_if_needed!(
-    ws::HPRLP_workspace_gpu,
-    iter_params_host::Vector{Float64},
-    uploaded_sigma::Float64,
-    uploaded_lambda_max::Float64)
-    if ws.sigma != uploaded_sigma || ws.lambda_max != uploaded_lambda_max
-        y_fact1 = ws.lambda_max * ws.sigma
-        @inbounds begin
-            iter_params_host[1] = ws.sigma
-            iter_params_host[2] = y_fact1
-            iter_params_host[3] = 1.0 / y_fact1
-            iter_params_host[4] = 1.0 / ws.sigma
-        end
-        copyto!(ws.Halpern_params, iter_params_host)
-        uploaded_sigma = ws.sigma
-        uploaded_lambda_max = ws.lambda_max
-    end
-    return uploaded_sigma, uploaded_lambda_max
-end
-
-@inline function upload_halpern_restart_params!(
-    ws::HPRLP_workspace_gpu,
-    restart_info::HPRLP_restart,
-    halpern_inner_host::Vector{Int64},
-    halpern_factors_host::Vector{Float64})
-    if restart_info.restart_flag > 0
-        @inbounds halpern_inner_host[1] = restart_info.inner
-        copyto!(ws.halpern_inner, halpern_inner_host)
-        current_fact1 = 1.0 / (restart_info.inner + 2.0)
-        @inbounds begin
-            halpern_factors_host[1] = current_fact1
-            halpern_factors_host[2] = 1.0 - current_fact1
-        end
-        copyto!(ws.halpern_factors, halpern_factors_host)
-    end
-    return nothing
-end
-
 function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_gpu, sc::Scaling_info_gpu, params::HPRLP_parameters)
     if !ws.use_custom_deterministic_fused
+        return
+    end
+    if lowercase(get(ENV, "HPRLP_CUSTOM_CSR_ALG2_AUTOTUNE", "1")) in ("0", "false", "off")
+        return
+    end
+    # Strict matching mode: keep update trajectory identical to deterministic cuSPARSE path.
+    if lowercase(get(ENV, "HPRLP_CUSTOM_CSR_ALG2_STRICT_MATCH", "1")) in ("1", "true", "on")
         ws.use_custom_fused_x = false
         ws.use_custom_fused_y = false
         return
     end
-    candidates = deterministic_probe_candidates()
+
+    fuse_x_mode = normalize_custom_backend_mode(get(ENV, "HPRLP_CUSTOM_CSR_ALG2_FUSE_X", "auto"))
+    fuse_y_mode = normalize_custom_backend_mode(get(ENV, "HPRLP_CUSTOM_CSR_ALG2_FUSE_Y", "auto"))
+    if fuse_x_mode == :on || fuse_y_mode == :on
+        return
+    end
+
+    candidates = deterministic_probe_candidates(fuse_x_mode, fuse_y_mode)
+    if length(candidates) == 1
+        return
+    end
 
     bench_iters = min(params.max_iter, deterministic_probe_iterations())
     if params.autotune_verbose
         println("AUTO-SELECT custom backends (", bench_iters, " deterministic iterations per candidate) ...")
-        n_A_short = length(ws.A_rows_short)
-        n_A_medium = length(ws.A_rows_medium)
-        n_A_total = n_A_short + n_A_medium
-        n_AT_short = length(ws.AT_rows_short)
-        n_AT_medium = length(ws.AT_rows_medium)
-        n_AT_total = n_AT_short + n_AT_medium
-        p_A_short = n_A_total > 0 ? 100.0 * n_A_short / n_A_total : 0.0
-        p_A_medium = n_A_total > 0 ? 100.0 * n_A_medium / n_A_total : 0.0
-        p_AT_short = n_AT_total > 0 ? 100.0 * n_AT_short / n_AT_total : 0.0
-        p_AT_medium = n_AT_total > 0 ? 100.0 * n_AT_medium / n_AT_total : 0.0
-        println("  A row buckets: short=", n_A_short,
-            ", medium=", n_A_medium,
-            ", total=", n_A_total,
-            " [",
-            @sprintf("%.1f%%", p_A_short), ", ",
-            @sprintf("%.1f%%", p_A_medium), "]")
-        println("  AT row buckets: short=", n_AT_short,
-            ", medium=", n_AT_medium,
-            ", total=", n_AT_total,
-            " [",
-            @sprintf("%.1f%%", p_AT_short), ", ",
-            @sprintf("%.1f%%", p_AT_medium), "]")
     end
 
     x_save = copy(ws.x)
@@ -1285,7 +1382,7 @@ function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_g
         update_y_check_gpu!(ws)
         tmp_res = HPRLP_residuals()
         tmp_restart = initialize_restart(ws.sigma)
-        compute_residuals_gpu!(ws, lp, sc, tmp_res, iters, params, tmp_restart)
+        compute_residuals_gpu!(ws, lp, sc, tmp_res, iters, params, tmp_restart, false)
         CUDA.synchronize()
         return tmp_res.KKTx_and_gap_org_bar
     end
@@ -1316,13 +1413,14 @@ function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_g
 
     ref_metric, ref_t = candidate_results[(false, false)]
     fused_candidates = [
-        (use_x=candidate.use_x,
-            use_y=candidate.use_y,
-            metric=candidate_results[(candidate.use_x, candidate.use_y)][1],
-            time_ns=candidate_results[(candidate.use_x, candidate.use_y)][2])
-        for candidate in candidates if candidate != (use_x=false, use_y=false)
+        (use_x = candidate.use_x,
+         use_y = candidate.use_y,
+         metric = candidate_results[(candidate.use_x, candidate.use_y)][1],
+         time_ns = candidate_results[(candidate.use_x, candidate.use_y)][2])
+        for candidate in candidates if candidate != (use_x = false, use_y = false)
     ]
-    decision = choose_deterministic_probe_backend(ref_metric, ref_t, fused_candidates)
+    decision = choose_deterministic_probe_backend(
+        ref_metric, ref_t, fused_candidates)
 
     restore_state!()
     ws.use_custom_fused_x = decision.use_x
@@ -1338,18 +1436,8 @@ function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_g
     return
 end
 
-# Helper function to determine if log should be printed
-function should_print_log(iter::Int, max_iter::Int, print_frequency::Int, elapsed_time::Float64, time_limit::Float64)
-    if print_frequency == -1
-        return (rem(iter, print_step(iter)) == 0) || (iter == max_iter) || (elapsed_time > time_limit)
-    elseif print_frequency > 0
-        return (rem(iter, print_frequency) == 0) || (iter == max_iter) || (elapsed_time > time_limit)
-    else
-        error("Invalid print_frequency: ", print_frequency, ". It should be a positive integer or -1 for automatic printing.")
-    end
-end
-
-@inline iteration_logging_enabled(verbose::Bool) = verbose
+@inline iteration_logging_enabled(verbose::Bool; log_iterations::Bool=false) =
+    verbose || log_iterations
 
 @inline function next_iteration_log_iter(iter::Int, print_frequency::Int)
     if print_frequency == -1
@@ -1361,6 +1449,43 @@ end
             ". It should be a positive integer or -1 for automatic printing.")
     end
     return ((iter ÷ step) + 1) * step
+end
+
+# Helper function to choose non-check CUDA-graph batch length.
+@inline function choose_graph_batch_len(
+    iter::Int,
+    max_iter::Int,
+    check_iter::Int,
+    verbose::Bool;
+    log_iterations::Bool=false,
+    print_frequency::Int=-1)
+    # Remaining iterations we can advance before exceeding max_iter.
+    remaining = max_iter - iter
+    remaining <= 0 && return 1
+    # Number of consecutive normal updates we can take before the next
+    # host iteration must switch to the check-update path.
+    to_check = mod(check_iter - 1 - rem(iter, check_iter), check_iter)
+    to_check <= 0 && return 1
+    max_batch = min(remaining, to_check)
+    if iteration_logging_enabled(verbose; log_iterations=log_iterations)
+        to_log = next_iteration_log_iter(iter, print_frequency) - iter
+        max_batch = min(max_batch, to_log)
+    end
+    if max_batch >= 4
+        return 4
+    end
+    return 1
+end
+
+# Helper function to determine if log should be printed
+function should_print_log(iter::Int, max_iter::Int, print_frequency::Int, t_start_alg::Float64, time_limit::Float64)
+    if print_frequency == -1
+        return (rem(iter, print_step(iter)) == 0) || (iter == max_iter) || (time() - t_start_alg > time_limit)
+    elseif print_frequency > 0
+        return (rem(iter, print_frequency) == 0) || (iter == max_iter) || (time() - t_start_alg > time_limit)
+    else
+        error("Invalid print_frequency: ", print_frequency, ". It should be a positive integer or -1 for automatic printing.")
+    end
 end
 
 # Helper function to print iteration log
@@ -1385,14 +1510,14 @@ function check_and_record_tolerance!(
     tolerance_times::Vector{Float64},
     tolerance_iters::Vector{Int},
     tolerance_reached::BitVector,
-    verbose::Bool
+    log_iterations::Bool
 )
     for i in eachindex(tolerance_levels)
         if !tolerance_reached[i] && residuals.KKTx_and_gap_org_bar < tolerance_levels[i]
             tolerance_times[i] = time() - t_start_alg
             tolerance_iters[i] = iter
             tolerance_reached[i] = true
-            if verbose
+            if log_iterations
                 println("KKT < ", tolerance_levels[i], " at iter = ", iter)
             end
         end
@@ -1456,6 +1581,9 @@ println("Objective: ", result.primal_obj)
 See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
 """
 function optimize(model::LP_info_cpu, params::HPRLP_parameters)
+    gpu_cache_key = gpu_warmup_cache_supported(params) ? gpu_warmup_cache_key(model, params) : nothing
+    gpu_cache_ref = gpu_cache_key === nothing ? nothing : Ref{Union{Nothing,GPUWarmupCache}}(nothing)
+
     # Handle warmup if requested
     if params.warm_up
         if params.verbose
@@ -1466,11 +1594,13 @@ function optimize(model::LP_info_cpu, params::HPRLP_parameters)
         end
         t_start_warmup = time()
 
-        # Save original max_iter and verbose
+        # Save original max_iter and logging settings
         original_max_iter = params.max_iter
         original_verbose = params.verbose
-        params.max_iter = 200
+        original_log_iterations = params.log_iterations
+        params.max_iter = min(original_max_iter, 200)
         params.verbose = false
+        params.log_iterations = false
 
         # Create a copy of the model for warmup
         warmup_model = LP_info_cpu(
@@ -1480,11 +1610,15 @@ function optimize(model::LP_info_cpu, params::HPRLP_parameters)
         )
 
         # Run warmup solve
-        solve(warmup_model, params)
+        solve(warmup_model, params;
+            gpu_warmup_cache_ref=gpu_cache_ref,
+            gpu_warmup_cache_key=gpu_cache_key,
+            populate_gpu_warmup_cache=true)
 
         # Restore original parameters
         params.max_iter = original_max_iter
         params.verbose = original_verbose
+        params.log_iterations = original_log_iterations
 
         warmup_time = time() - t_start_warmup
         if params.verbose
@@ -1502,7 +1636,10 @@ function optimize(model::LP_info_cpu, params::HPRLP_parameters)
     end
 
     setup_start = time()
-    results = solve(model, params)
+    results = solve(model, params;
+        gpu_warmup_cache_ref=gpu_cache_ref,
+        gpu_warmup_cache_key=gpu_cache_key,
+        reuse_gpu_warmup_cache=true)
     setup_time = time() - setup_start - results.time
 
     if params.verbose
@@ -1544,7 +1681,11 @@ result = solve(model, params)
 
 See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function solve(model::LP_info_cpu, params::HPRLP_parameters)
+function solve(model::LP_info_cpu, params::HPRLP_parameters;
+    gpu_warmup_cache_ref=nothing,
+    gpu_warmup_cache_key=nothing,
+    populate_gpu_warmup_cache::Bool=false,
+    reuse_gpu_warmup_cache::Bool=false)
     # Validate GPU parameters before attempting GPU operations
     if params.use_gpu
         validate_gpu_parameters!(params)
@@ -1575,15 +1716,40 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
     log_residuals = HPRLP_residuals()
     ws = params.use_gpu ? allocate_workspace_gpu(lp, scaling_info, params) : allocate_workspace_cpu(lp, scaling_info, params)
     restart_info = initialize_restart(ws.sigma)
+    log_iterations = iteration_logging_enabled(params.verbose; log_iterations=params.log_iterations)
+
+    cached_gpu_setup = nothing
+    if params.use_gpu && reuse_gpu_warmup_cache &&
+       gpu_warmup_cache_ref !== nothing && gpu_warmup_cache_key !== nothing
+        candidate_cache = gpu_warmup_cache_ref[]
+        if candidate_cache isa GPUWarmupCache && candidate_cache.key == gpu_warmup_cache_key
+            cached_gpu_setup = candidate_cache
+        end
+    end
 
     # Power iteration to estimate lambda_max
-    power_time = compute_maximum_eigenvalue!(lp, ws, params)
-    if params.use_gpu
-        autotune_custom_update_backends!(ws, lp, scaling_info, params)
+    power_time = 0.0
+    if cached_gpu_setup isa GPUWarmupCache
+        apply_gpu_warmup_cache!(ws, cached_gpu_setup)
+    else
+        power_time = compute_maximum_eigenvalue!(lp, ws, params)
+        if params.use_gpu
+            autotune_custom_update_backends!(ws, lp, scaling_info, params)
+            if populate_gpu_warmup_cache &&
+               gpu_warmup_cache_ref !== nothing &&
+               gpu_warmup_cache_key !== nothing
+                gpu_warmup_cache_ref[] = GPUWarmupCache(
+                    gpu_warmup_cache_key,
+                    ws.lambda_max,
+                    ws.use_custom_fused_x,
+                    ws.use_custom_fused_y,
+                )
+            end
+        end
     end
 
 
-    if params.verbose
+    if log_iterations
         println(" iter     errRp        errRd         p_obj            d_obj          gap         sigma       time")
     end
 
@@ -1597,25 +1763,43 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
     compute_residuals!, update_sigma!, collect_results!, update_x_z_check!, update_x_z_normal!, update_y_check!, update_y_normal!, compute_weighted_norm! =
         setup_solver_functions(params.use_gpu)
 
-    graph_exec = nothing
+    graph_exec_normal = nothing
+    graph_exec_normal4 = nothing
+    build_normal_graph_exec = batch_len -> begin
+        graph = CUDA.capture() do
+            for _ in 1:batch_len
+                update_x_z_normal_gpu!(ws)
+                update_y_normal_gpu!(ws)
+            end
+        end
+        return CUDA.instantiate(graph)
+    end
+    # Reuse tiny host buffers for occasional scalar parameter updates.
     iter_params_host = Vector{Float64}(undef, 4)
     halpern_inner_host = Vector{Int64}(undef, 1)
     halpern_factors_host = Vector{Float64}(undef, 2)
+    halpern_counter_host = Vector{Int32}(undef, 1)
     uploaded_sigma = NaN
     uploaded_lambda_max = NaN
     elapsed_time = 0.0
+    skip_remaining = 0
 
     # Main iteration loop
     for iter = 0:params.max_iter
-        periodic_check = rem(iter, params.check_iter) == 0
-
-        # Determine if log should be printed
-        if (iter & 31) == 0
-            elapsed_time = time() - t_start_alg
+        if skip_remaining > 0
+            skip_remaining -= 1
+            continue
         end
-        print_yes = should_print_log(iter, params.max_iter, params.print_frequency, elapsed_time, params.time_limit)
+
+        # restart_flag is only meaningful for the current iteration.
+        restart_info.restart_flag = 0
+
+        periodic_check = rem(iter, params.check_iter) == 0
+        # Use the configured print schedule for both verbose and log-only iteration output.
+        print_yes = log_iterations &&
+            should_print_log(iter, params.max_iter, params.print_frequency, t_start_alg, params.time_limit)
         residuals_refreshed = false
-        # residuals_to_print = residuals
+        residuals_to_print = residuals
 
         # Compute residuals
         if periodic_check
@@ -1623,8 +1807,8 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
             compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info, compute_gap_now)
             residuals_refreshed = true
         elseif print_yes
-            compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info, false)
-            # residuals_to_print = residuals
+            compute_residuals!(ws, lp, scaling_info, log_residuals, iter, params, restart_info, false)
+            residuals_to_print = log_residuals
         end
         if params.use_gpu && ws.pending_last_gap && periodic_check
             consume_pending_last_gap_gpu!(ws, restart_info)
@@ -1637,15 +1821,14 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         status = check_break(residuals, iter, elapsed_time, params)
 
         # Check restart conditions
-        restart_info.restart_flag = 0
         if periodic_check
             check_restart(restart_info, iter, params.check_iter, ws.sigma)
         end
 
         # Print iteration log
         if print_yes || (status != "CONTINUE")
-            if params.verbose
-                print_iteration_log(iter, residuals, ws.sigma, t_start_alg)
+            if log_iterations
+                print_iteration_log(iter, residuals_to_print, ws.sigma, t_start_alg)
             end
 
             # Save to HDF5 if auto_save is enabled
@@ -1663,7 +1846,7 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         # Check and record tolerance thresholds
         if residuals_refreshed
             check_and_record_tolerance!(residuals, iter, t_start_alg, tolerance_levels,
-                tolerance_times, tolerance_iters, tolerance_reached, params.verbose)
+                tolerance_times, tolerance_iters, tolerance_reached, log_iterations)
         end
 
         # Collect results and return if terminated
@@ -1693,32 +1876,61 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         # Restart if needed
         do_restart!(restart_info, ws)
 
-        # Rebuild Graph if restarted
-        if params.use_gpu && (iter == 0 || restart_info.restart_flag > 0)
-            graph = CUDA.capture() do
-                update_x_z_normal_gpu!(ws)
-                update_y_normal_gpu!(ws)
-            end
-            graph_exec = CUDA.instantiate(graph)
+        # Capture once for the supported normal-update graph batches.
+        if params.use_gpu && iter == 0
+            graph_exec_normal = build_normal_graph_exec(1)
+            graph_exec_normal4 = build_normal_graph_exec(4)
         end
 
         # Determine whether to compute bar points for residuals
         ws.to_check = (rem(iter + 1, params.check_iter) == 0) || (restart_info.restart_flag > 0)
-        # if params.print_frequency == -1
-        #     ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter + 1)) == 0)
-        # elseif params.print_frequency > 0
-        #     ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
-        # end
         if params.use_gpu
-            uploaded_sigma, uploaded_lambda_max = upload_halpern_iter_params_if_needed!(
-                ws, iter_params_host, uploaded_sigma, uploaded_lambda_max)
-            upload_halpern_restart_params!(ws, restart_info, halpern_inner_host, halpern_factors_host)
+            if ws.sigma != uploaded_sigma || ws.lambda_max != uploaded_lambda_max
+                y_fact1 = ws.lambda_max * ws.sigma
+                @inbounds begin
+                    iter_params_host[1] = ws.sigma
+                    iter_params_host[2] = y_fact1
+                    iter_params_host[3] = 1.0 / y_fact1
+                    iter_params_host[4] = 1.0 / ws.sigma
+                end
+                copyto!(ws.Halpern_params, iter_params_host)
+                uploaded_sigma = ws.sigma
+                uploaded_lambda_max = ws.lambda_max
+            end
+
+            if restart_info.restart_flag > 0
+                @inbounds halpern_inner_host[1] = restart_info.inner
+                copyto!(ws.halpern_inner, halpern_inner_host)
+                current_fact1 = 1.0 / (restart_info.inner + 2.0)
+                @inbounds begin
+                    halpern_factors_host[1] = current_fact1
+                    halpern_factors_host[2] = 1.0 - current_fact1
+                    halpern_counter_host[1] = 0
+                end
+                copyto!(ws.halpern_factors, halpern_factors_host)
+                copyto!(ws.halpern_block_counter, halpern_counter_host)
+            end
 
             if ws.to_check
                 update_x_z_check_gpu!(ws)
                 update_y_check_gpu!(ws)
+                restart_info.inner += 1
             else
-                CUDA.launch(graph_exec)
+                graph_batch = choose_graph_batch_len(
+                    iter,
+                    params.max_iter,
+                    params.check_iter,
+                    params.verbose;
+                    log_iterations=log_iterations,
+                    print_frequency=params.print_frequency)
+                if graph_batch == 4
+                    CUDA.launch(graph_exec_normal4)
+                    restart_info.inner += 4
+                    skip_remaining = 3
+                else
+                    CUDA.launch(graph_exec_normal)
+                    restart_info.inner += 1
+                end
             end
         else
             current_fact1 = 1.0 / (restart_info.inner + 2.0)
@@ -1730,8 +1942,8 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
                 update_x_z_normal!(ws, current_fact1, current_fact2)
                 update_y_normal!(ws, current_fact1, current_fact2)
             end
+            restart_info.inner += 1
         end
-        restart_info.inner += 1
 
         # Compute weighted norm
         if !params.use_gpu && rem(iter + 1, params.check_iter) == 0
@@ -1740,7 +1952,6 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
         if restart_info.restart_flag > 0
             if params.use_gpu
                 queue_pending_last_gap_gpu!(ws)
-                # restart_info.last_gap = compute_weighted_norm!(ws)
             else
                 restart_info.last_gap = compute_weighted_norm!(ws)
             end
