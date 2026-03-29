@@ -7,7 +7,7 @@
 > **A Julia implementation of the Halpern Peaceman-Rachford (HPR) method for solving linear programming (LP) problems on the GPU.**
 
 **📖 Documentation:**
-- **[Stable](https://polyu-ior.github.io/HPR-LP/)** - Latest released version (v0.1.3)
+- **[Stable](https://polyu-ior.github.io/HPR-LP/)** - Latest released version
 - **[Dev](https://polyu-ior.github.io/HPR-LP/dev/)** - Latest from main branch (recommended for development)
 
 ---
