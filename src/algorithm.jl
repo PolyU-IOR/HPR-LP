@@ -354,9 +354,13 @@ function update_sigma_gpu!(
 )
     if restart_info.restart_flag >= 1 && restart_info.restart_flag <= 3
         # Movement norms are populated during periodic compute_residuals_gpu!.
-        compute_restart_movement_norms_gpu!(ws)
-        primal_move = ws.reduction_scalars_host[9]
-        dual_move = ws.reduction_scalars_host[10]
+        # compute_restart_movement_norms_gpu!(ws)
+        # primal_move = ws.reduction_scalars_host[9]
+        # dual_move = ws.reduction_scalars_host[10]
+        axpby_gpu!(1.0, ws.x_bar, -1.0, ws.last_x, ws.dx, ws.n)
+        axpby_gpu!(1.0, ws.y_bar, -1.0, ws.last_y, ws.dy, ws.m)
+        primal_move = CUDA.norm(ws.dx)
+        dual_move = CUDA.norm(ws.dy)
         if primal_move > 1e-16 && dual_move > 1e-16 &&
            primal_move < 1e12 && dual_move < 1e12
             pm_over_dm = primal_move / dual_move
