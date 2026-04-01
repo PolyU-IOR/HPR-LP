@@ -483,7 +483,7 @@ function validate_gpu_parameters!(params::HPRLP_parameters)
 end
 
 """
-    build_from_mps(filename; verbose=true)
+    build_from_mps(filename::String, verbose::Bool=true)
 
 Build an LP model from an MPS file.
 
@@ -505,7 +505,7 @@ result = optimize(model, params)
 
 See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function build_from_mps(filename::String; verbose::Bool=true)
+function build_from_mps(filename::String, verbose::Bool=true)
     t_start = time()
     if verbose
         println("READING FILE ... ", filename)
