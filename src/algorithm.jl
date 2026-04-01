@@ -173,6 +173,112 @@ function Halpern_update_cpu!(ws::HPRLP_workspace_cpu, restart_info::HPRLP_restar
     restart_info.inner += 1
 end
 
+function compute_original_kkt_metrics(
+    model::LP_info_cpu,
+    x::AbstractVector{<:Real},
+    y::AbstractVector{<:Real},
+    z::AbstractVector{<:Real},
+)
+    xh = x isa Vector{Float64} ? x : Array(x)
+    yh = y isa Vector{Float64} ? copy(y) : Array(y)
+    zh = z isa Vector{Float64} ? copy(z) : Array(z)
+
+    ALh = copy(model.AL)
+    AUh = copy(model.AU)
+    lh = copy(model.l)
+    uh = copy(model.u)
+
+    ALh[ALh .== -Inf] .= -1.0e100
+    AUh[AUh .== Inf] .= 1.0e100
+    lh[lh .== -Inf] .= -1.0e100
+    uh[uh .== Inf] .= 1.0e100
+
+    @. yh = ifelse((AUh .== 1e100) & (ALh .== -1e100), 0.0,
+        ifelse(AUh .== 1e100, max(yh, 0.0),
+            ifelse(ALh .== -1e100, min(yh, 0.0), yh)))
+
+    @. zh = ifelse((uh .== 1e100) & (lh .== -1e100), 0.0,
+        ifelse(uh .== 1e100, max(zh, 0.0),
+            ifelse(lh .== -1e100, min(zh, 0.0), zh)))
+
+    Ax = model.A * xh
+    ATy = model.AT * yh
+
+    sum_sq_b = 0.0
+    for val in model.AL
+        if isfinite(val)
+            sum_sq_b += val^2
+        end
+    end
+    for val in model.AU
+        if isfinite(val)
+            sum_sq_b += val^2
+        end
+    end
+    norm_b = 1.0 + sqrt(sum_sq_b)
+
+    sum_sq_c = 0.0
+    for val in model.c
+        if isfinite(val)
+            sum_sq_c += val^2
+        end
+    end
+    norm_c = 1.0 + sqrt(sum_sq_c)
+
+    err_Ax_sq = 0.0
+    for i in eachindex(Ax)
+        val = Ax[i]
+        lower = ALh[i]
+        upper = AUh[i]
+        err_Ax_sq += max(0.0, lower - val, val - upper)^2
+    end
+    err_Ax = sqrt(err_Ax_sq)
+
+    err_x_sq = 0.0
+    for j in eachindex(xh)
+        val = xh[j]
+        lower = lh[j]
+        upper = uh[j]
+        err_x_sq += max(0.0, lower - val, val - upper)^2
+    end
+    err_x = sqrt(err_x_sq)
+    primal_feas = max(err_Ax, err_x) / norm_b
+
+    dual_residual = model.c .- ATy .- zh
+    dual_feas = norm(dual_residual) / norm_c
+
+    p_lin = dot(model.c, xh)
+    delta_y = sum(((yb, al, au),) -> yb >= 0 ? yb * al : yb * au, zip(yh, ALh, AUh))
+    delta_z = sum(((zb, lb, ub),) -> zb >= 0 ? zb * lb : zb * ub, zip(zh, lh, uh))
+    d_lin = delta_y + delta_z
+
+    gap = abs(d_lin - p_lin) / (1.0 + abs(d_lin) + abs(p_lin))
+    p_obj = p_lin + model.obj_constant
+    d_obj = d_lin + model.obj_constant
+
+    return p_obj, d_obj, primal_feas, dual_feas, gap, delta_y, delta_z
+end
+
+@inline function compute_original_kkt_error(p_feas::Real, d_feas::Real, gap::Real)
+    return max(p_feas, d_feas, gap)
+end
+
+function compute_original_recovery_failures(
+    p_feas::Real,
+    d_feas::Real,
+    gap::Real,
+    stoptol::Real,
+)
+    failures = String[]
+    if p_feas > stoptol
+        push!(failures, "primal recover failed")
+    end
+    if d_feas > stoptol || gap > stoptol
+        push!(failures, "dual recover failed")
+    end
+    return failures
+end
+
 # the function to compute the residuals for the original LP problem
 function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     lp::LP_info_gpu,
@@ -1544,7 +1650,9 @@ result = solve(model, params)
 
 See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function solve(model::LP_info_cpu, params::HPRLP_parameters)
+function solve(model::LP_info_cpu, params::HPRLP_parameters, original_model::Union{Nothing,LP_info_cpu}=nothing)
+    reference_model = isnothing(original_model) ? model.original_model : original_model
+
     # Validate GPU parameters before attempting GPU operations
     if params.use_gpu
         validate_gpu_parameters!(params)
@@ -1684,6 +1792,43 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
                 println("="^80)
             end
             results = collect_results!(ws, residuals, scaling_info, iter, t_start_alg, power_time, status, tolerance_times, tolerance_iters)
+            if model.presolver_model !== nothing
+                presolver_model = model.presolver_model
+                if params.verbose
+                    println("\n", "="^80)
+                    println("PSLP POSTSOLVE")
+                    println("="^80)
+                end
+
+                try
+                    x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
+                    y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
+                    z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
+                    x_full, y_full, z_full = PSLP.postsolve(presolver_model, x_red, y_red, z_red)
+                    results.x = x_full
+                    results.y = y_full
+                    results.z = z_full
+                finally
+                    PSLP.free_presolver_wrapper(presolver_model)
+                    model.presolver_model = nothing
+                end
+
+                if reference_model !== nothing
+                    p_obj, d_obj, p_feas, d_feas, gap, delta_y, delta_z =
+                        compute_original_kkt_metrics(reference_model, results.x, results.y, results.z)
+                    original_kkt_error = compute_original_kkt_error(p_feas, d_feas, gap)
+                    original_kkt_passed = original_kkt_error <= params.stoptol
+
+                    if !original_kkt_passed
+                        failure_reasons = compute_original_recovery_failures(
+                            p_feas, d_feas, gap, params.stoptol)
+                        @warn "Postsolve original KKT check failed: $(join(failure_reasons, "; "))." Stop_Tolerance=params.stoptol Original_Primal_Objective=p_obj Original_Dual_Objective=d_obj Original_Primal_Feasibility=p_feas Original_Dual_Feasibility=d_feas Original_Relative_Gap=gap
+                    elseif params.verbose
+                        println("Original KKT Check Passed")
+                    end
+                end
+            end
+
             return results
         end
 

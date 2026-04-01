@@ -50,7 +50,7 @@ Locally (recommended for development):
 ```bash
 git clone https://github.com/PolyU-IOR/HPR-LP.git
 cd HPR-LP
-julia --project=. -e 'using Pkg; Pkg.instantiate()'
+julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.build()'
 ```
 
 ### Simple Example

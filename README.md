@@ -59,9 +59,9 @@ Before using HPR-LP, make sure the following dependencies are installed:
 - **CUDA** (Required for GPU acceleration; install the appropriate version for your GPU and Julia, >= 12.4 recommended)
 - Required Julia packages
 
-> To install the required Julia packages and build the HPR-LP environment, run:
+> To install the required Julia packages and build the HPR-LP environment (including PSLP), run:
 ```bash
-julia --project -e 'using Pkg; Pkg.instantiate()'
+julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.build()'
 ```
 
 > To verify that CUDA is properly installed and working with Julia, run:
@@ -243,6 +243,5 @@ println("x2 = ", result.x[2])
 Kaihuang Chen, [Defeng Sun](https://www.polyu.edu.hk/ama/profile/dfsun//), [Yancheng Yuan](https://www.polyu.edu.hk/ama/people/academic-staff/dr-yuan-yancheng/?sc_lang=en), Guojun Zhang, and [Xinyuan Zhao](https://scholar.google.com/citations?user=nFG8lEYAAAAJ&hl=en), “[HPR-LP: An implementation of an HPR method for solving linear programming](https://www.polyu.edu.hk/ama/profile/dfsun//files/HPR-LP_Published2025.pdf)”, arXiv:2408.12179 (August 2024), [Mathematical Programming Computation](https://link.springer.com/journal/12532) 17 (2025), doi.org/10.1007/s12532-025-00292-0.
 
 ---
-
 
 

@@ -63,6 +63,87 @@ using LinearAlgebra
         @test result.x[1] >= -1e-6  # x1 >= 0
         @test result.x[2] >= -1e-6  # x2 >= 0
     end
+
+    @testset "PSLP Presolve Integration" begin
+        A = sparse([-1.0 -2.0; -3.0 -1.0])
+        AL = Vector{Float64}([-10.0, -12.0])
+        AU = Vector{Float64}([Inf, Inf])
+        c = Vector{Float64}([-3.0, -5.0])
+        l = Vector{Float64}([0.0, 0.0])
+        u = Vector{Float64}([Inf, Inf])
+
+        params = HPRLP.HPRLP_parameters()
+        params.time_limit = 60
+        params.stoptol = 1e-4
+        params.use_gpu = false
+        params.warm_up = false
+        params.verbose = false
+        params.use_presolve = true
+
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, params)
+        result = HPRLP.optimize(model, params)
+
+        @test result.status == "OPTIMAL"
+        @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+        @test length(result.x) == 2
+        @test result.x[1] >= -1e-6
+        @test result.x[2] >= -1e-6
+    end
+
+    @testset "Original KKT Metrics" begin
+        A = sparse([1.0;;])
+        AL = [1.0]
+        AU = [1.0]
+        c = [1.0]
+        l = [0.0]
+        u = [2.0]
+
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+        p_obj, d_obj, p_feas, d_feas, gap, delta_y, delta_z =
+            HPRLP.compute_original_kkt_metrics(model, [1.0], [1.0], [0.0])
+
+        @test isapprox(p_obj, 1.0, atol=1e-10)
+        @test isapprox(d_obj, 1.0, atol=1e-10)
+        @test isapprox(p_feas, 0.0, atol=1e-10)
+        @test isapprox(d_feas, 0.0, atol=1e-10)
+        @test isapprox(gap, 0.0, atol=1e-10)
+        @test isapprox(delta_y, 1.0, atol=1e-10)
+        @test isapprox(delta_z, 0.0, atol=1e-10)
+    end
+
+    @testset "Original KKT Projection With Infinite Bounds" begin
+        A = sparse([1.0;;])
+        AL = [-Inf]
+        AU = [1.0]
+        c = [0.0]
+        l = [0.0]
+        u = [Inf]
+
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+        p_obj, d_obj, p_feas, d_feas, gap, delta_y, delta_z =
+            HPRLP.compute_original_kkt_metrics(model, [0.5], [2.0], [-3.0])
+
+        @test isapprox(p_obj, 0.0, atol=1e-10)
+        @test isapprox(d_obj, 0.0, atol=1e-10)
+        @test isapprox(p_feas, 0.0, atol=1e-10)
+        @test isapprox(d_feas, 0.0, atol=1e-10)
+        @test isapprox(gap, 0.0, atol=1e-10)
+        @test isapprox(delta_y, 0.0, atol=1e-10)
+        @test isapprox(delta_z, 0.0, atol=1e-10)
+    end
+
+    @testset "Original KKT Error" begin
+        @test HPRLP.compute_original_kkt_error(1e-3, 2e-4, 3e-5) == 1e-3
+        @test HPRLP.compute_original_kkt_error(2e-6, 5e-5, 4e-6) == 5e-5
+    end
+
+    @testset "Original Recovery Failures" begin
+        @test isempty(HPRLP.compute_original_recovery_failures(1e-6, 2e-6, 3e-6, 1e-4))
+        @test HPRLP.compute_original_recovery_failures(2e-4, 2e-6, 3e-6, 1e-4) == ["primal recover failed"]
+        @test HPRLP.compute_original_recovery_failures(2e-6, 2e-4, 3e-6, 1e-4) == ["dual recover failed"]
+        @test HPRLP.compute_original_recovery_failures(2e-6, 2e-6, 3e-4, 1e-4) == ["dual recover failed"]
+        @test HPRLP.compute_original_recovery_failures(2e-4, 2e-4, 3e-6, 1e-4) == ["primal recover failed", "dual recover failed"]
+    end
     
     @testset "JuMP Integration - Optimizer" begin
         # Test that Optimizer is exported and can be instantiated
@@ -96,9 +177,12 @@ using LinearAlgebra
         
         params.use_gpu = false
         @test params.use_gpu == false
-        
+
         params.verbose = false
         @test params.verbose == false
+
+        params.use_presolve = true
+        @test params.use_presolve == true
     end
     
     @testset "Results Structure" begin
