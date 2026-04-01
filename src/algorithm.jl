@@ -188,10 +188,10 @@ function compute_original_kkt_metrics(
     lh = copy(model.l)
     uh = copy(model.u)
 
-    ALh[ALh .== -Inf] .= -1.0e100
-    AUh[AUh .== Inf] .= 1.0e100
-    lh[lh .== -Inf] .= -1.0e100
-    uh[uh .== Inf] .= 1.0e100
+    ALh[ALh.==-Inf] .= -1.0e100
+    AUh[AUh.==Inf] .= 1.0e100
+    lh[lh.==-Inf] .= -1.0e100
+    uh[uh.==Inf] .= 1.0e100
 
     @. yh = ifelse((AUh .== 1e100) & (ALh .== -1e100), 0.0,
         ifelse(AUh .== 1e100, max(yh, 0.0),
@@ -256,14 +256,10 @@ function compute_original_kkt_metrics(
     p_obj = p_lin + model.obj_constant
     d_obj = d_lin + model.obj_constant
 
-    return p_obj, d_obj, primal_feas, dual_feas, gap, delta_y, delta_z
+    return p_obj, d_obj, primal_feas, dual_feas, gap
 end
 
-@inline function compute_original_kkt_error(p_feas::Real, d_feas::Real, gap::Real)
-    return max(p_feas, d_feas, gap)
-end
-
-function compute_original_recovery_failures(
+function check_org_recovery_failures(
     p_feas::Real,
     d_feas::Real,
     gap::Real,
@@ -277,6 +273,46 @@ function compute_original_recovery_failures(
         push!(failures, "dual recover failed")
     end
     return failures
+end
+
+function postsolve_and_validate_original_kkt!(
+    results::HPRLP_results,
+    original_model::LP_info_cpu,
+    presolver_info,
+    params::HPRLP_parameters,
+)
+    if params.verbose
+        println("\n", "="^80)
+        println("PSLP POSTSOLVE")
+        println("="^80)
+    end
+
+    try
+        x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
+        y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
+        z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
+        x_org, y_org, z_org = PSLP.postsolve(presolver_info, x_red, y_red, z_red)
+        results.x = x_org
+        results.y = y_org
+        results.z = z_org
+    finally
+        PSLP.free_presolver_wrapper(presolver_info)
+    end
+
+    p_obj, d_obj, p_feas, d_feas, gap =
+        compute_original_kkt_metrics(original_model, results.x, results.y, results.z)
+    original_kkt_error = max(p_feas, d_feas, gap)
+    original_kkt_passed = original_kkt_error <= params.stoptol
+
+    if !original_kkt_passed
+        failure_reasons = check_org_recovery_failures(
+            p_feas, d_feas, gap, params.stoptol)
+        @warn "Postsolve original KKT check failed: $(join(failure_reasons, "; "))." Stop_Tolerance = params.stoptol Original_Primal_Objective = p_obj Original_Dual_Objective = d_obj Original_Primal_Feasibility = p_feas Original_Dual_Feasibility = d_feas Original_Relative_Gap = gap
+    elseif params.verbose
+        println("Original KKT Check Passed")
+    end
+
+    return nothing
 end
 
 # the function to compute the residuals for the original LP problem
@@ -1562,6 +1598,12 @@ println("Objective: ", result.primal_obj)
 See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
 """
 function optimize(model::LP_info_cpu, params::HPRLP_parameters)
+    # Presolve if requested
+    if params.use_presolve
+        original_model = model
+        model, presolver_info = apply_pslp_presolve(original_model, params.verbose)
+    end
+
     # Handle warmup if requested
     if params.warm_up
         if params.verbose
@@ -1618,6 +1660,10 @@ function optimize(model::LP_info_cpu, params::HPRLP_parameters)
         println("="^80)
     end
 
+    if presolver_info !== nothing
+        postsolve_and_validate_original_kkt!(results, original_model, presolver_info, params)
+    end
+
     return results
 end
 
@@ -1650,9 +1696,7 @@ result = solve(model, params)
 
 See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function solve(model::LP_info_cpu, params::HPRLP_parameters, original_model::Union{Nothing,LP_info_cpu}=nothing)
-    reference_model = isnothing(original_model) ? model.original_model : original_model
-
+function solve(model::LP_info_cpu, params::HPRLP_parameters)
     # Validate GPU parameters before attempting GPU operations
     if params.use_gpu
         validate_gpu_parameters!(params)
@@ -1792,43 +1836,6 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters, original_model::Uni
                 println("="^80)
             end
             results = collect_results!(ws, residuals, scaling_info, iter, t_start_alg, power_time, status, tolerance_times, tolerance_iters)
-            if model.presolver_model !== nothing
-                presolver_model = model.presolver_model
-                if params.verbose
-                    println("\n", "="^80)
-                    println("PSLP POSTSOLVE")
-                    println("="^80)
-                end
-
-                try
-                    x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
-                    y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
-                    z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
-                    x_full, y_full, z_full = PSLP.postsolve(presolver_model, x_red, y_red, z_red)
-                    results.x = x_full
-                    results.y = y_full
-                    results.z = z_full
-                finally
-                    PSLP.free_presolver_wrapper(presolver_model)
-                    model.presolver_model = nothing
-                end
-
-                if reference_model !== nothing
-                    p_obj, d_obj, p_feas, d_feas, gap, delta_y, delta_z =
-                        compute_original_kkt_metrics(reference_model, results.x, results.y, results.z)
-                    original_kkt_error = compute_original_kkt_error(p_feas, d_feas, gap)
-                    original_kkt_passed = original_kkt_error <= params.stoptol
-
-                    if !original_kkt_passed
-                        failure_reasons = compute_original_recovery_failures(
-                            p_feas, d_feas, gap, params.stoptol)
-                        @warn "Postsolve original KKT check failed: $(join(failure_reasons, "; "))." Stop_Tolerance=params.stoptol Original_Primal_Objective=p_obj Original_Dual_Objective=d_obj Original_Primal_Feasibility=p_feas Original_Dual_Feasibility=d_feas Original_Relative_Gap=gap
-                    elseif params.verbose
-                        println("Original KKT Check Passed")
-                    end
-                end
-            end
-
             return results
         end
 

@@ -109,7 +109,7 @@ mutable struct HPRLP_parameters
     use_presolve::Bool
 
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", false)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", true)
 end
 
 """
@@ -551,16 +551,6 @@ mutable struct LP_info_cpu
     l::Vector{Float64}
     u::Vector{Float64}
     obj_constant::Float64
-    presolver_model::Any
-    original_model::Any
-end
-
-function LP_info_cpu(A, AT, c, AL, AU, l, u, obj_constant)
-    return LP_info_cpu(A, AT, c, AL, AU, l, u, obj_constant, nothing, nothing)
-end
-
-function LP_info_cpu(A, AT, c, AL, AU, l, u, obj_constant, presolver_model)
-    return LP_info_cpu(A, AT, c, AL, AU, l, u, obj_constant, presolver_model, nothing)
 end
 
 # the space for the LP information on the GPU
