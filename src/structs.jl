@@ -35,6 +35,7 @@ Parameters for the HPR-LP solver.
 - `initial_y::Union{Vector{Float64},Nothing}`: Initial dual solution (default: nothing)
 - `auto_save::Bool`: Automatically save best x, y, and sigma during optimization (default: false)
 - `save_filename::String`: Filename for auto-save HDF5 file (default: "hprlp_autosave.h5")
+- `use_presolve::Bool`: Enable PSLP presolve before the main HPR-LP solve (default: false)
 
 # Example
 ```julia
@@ -104,8 +105,11 @@ mutable struct HPRLP_parameters
     # filename for auto-save HDF5 file, default is "hprlp_autosave.h5"
     save_filename::String
 
+    # whether to use PSLP presolve or not, default is false
+    use_presolve::Bool
+
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5")
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", false)
 end
 
 """
@@ -547,6 +551,16 @@ mutable struct LP_info_cpu
     l::Vector{Float64}
     u::Vector{Float64}
     obj_constant::Float64
+    presolver_model::Any
+    original_model::Any
+end
+
+function LP_info_cpu(A, AT, c, AL, AU, l, u, obj_constant)
+    return LP_info_cpu(A, AT, c, AL, AU, l, u, obj_constant, nothing, nothing)
+end
+
+function LP_info_cpu(A, AT, c, AL, AU, l, u, obj_constant, presolver_model)
+    return LP_info_cpu(A, AT, c, AL, AU, l, u, obj_constant, presolver_model, nothing)
 end
 
 # the space for the LP information on the GPU

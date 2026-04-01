@@ -1,5 +1,54 @@
 # The function to read the LP problem from the file and formulate the LP problem
-function formulation(lp, verbose::Bool=true)
+function apply_pslp_presolve(model::LP_info_cpu, verbose::Bool, time_limit::Float64)
+    if verbose
+        println("PSLP PRESOLVE ...")
+    end
+    t_start = time()
+
+    settings = PSLP.Settings(max_time=time_limit, verbose=verbose)
+    presolver_model, reduced_data = PSLP.load_and_run_presolve(
+        model.c,
+        model.A,
+        model.l,
+        model.u,
+        model.AL,
+        model.AU;
+        settings=settings,
+    )
+
+    if verbose
+        println(@sprintf("PSLP PRESOLVE time: %.2f seconds", time() - t_start))
+    end
+
+    if reduced_data === nothing || presolver_model === nothing
+        if presolver_model !== nothing
+            PSLP.free_presolver_wrapper(presolver_model)
+        end
+        return model
+    end
+
+    c_red, A_red, l_red, u_red, lhs_red, rhs_red, obj_offset = reduced_data
+
+    if verbose
+        println("PSLP reduced size: $(size(model.A)) -> $(size(A_red))")
+        println("PSLP objective offset: $(obj_offset)")
+    end
+
+    return LP_info_cpu(
+        A_red,
+        transpose(A_red),
+        c_red,
+        lhs_red,
+        rhs_red,
+        l_red,
+        u_red,
+        model.obj_constant + obj_offset,
+        presolver_model,
+        model,
+    )
+end
+
+function formulation(lp, verbose::Bool=true; use_presolve::Bool=false, time_limit::Float64=3600.0)
     A = sparse(lp.arows, lp.acols, lp.avals, lp.ncon, lp.nvar)
 
     # Remove the rows of A that are all zeros
@@ -27,7 +76,10 @@ function formulation(lp, verbose::Bool=true)
 
     standard_lp = LP_info_cpu(A, transpose(A), lp.c, lp.lcon, lp.ucon, lp.lvar, lp.uvar, lp.c0)
 
-    # Return the modified lp
+    if use_presolve
+        return apply_pslp_presolve(standard_lp, verbose, time_limit)
+    end
+
     return standard_lp
 end
 
@@ -510,6 +562,38 @@ function build_from_mps(filename::String; verbose::Bool=true)
     return standard_lp
 end
 
+function build_from_mps(filename::String, params::HPRLP_parameters)
+    t_start = time()
+    if params.verbose
+        println("READING FILE ... ", filename)
+    end
+    io = open(filename)
+    lp = Logging.with_logger(Logging.NullLogger()) do
+        readqps(io, mpsformat=:free)
+    end
+    close(io)
+    read_time = time() - t_start
+    if params.verbose
+        println(@sprintf("READING FILE time: %.2f seconds", read_time))
+    end
+
+    t_start = time()
+    if params.verbose
+        println("FORMULATING LP ...")
+    end
+    standard_lp = formulation(
+        lp,
+        params.verbose;
+        use_presolve=params.use_presolve,
+        time_limit=params.time_limit,
+    )
+    if params.verbose
+        println(@sprintf("FORMULATING LP time: %.2f seconds", time() - t_start))
+    end
+
+    return standard_lp
+end
+
 """
     build_from_Abc(A, c, AL, AU, l, u, obj_constant=0.0)
 
@@ -575,6 +659,35 @@ function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     return standard_lp
 end
 
+function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
+    c::Vector{Float64},
+    AL::Vector{Float64},
+    AU::Vector{Float64},
+    l::Vector{Float64},
+    u::Vector{Float64},
+    params::HPRLP_parameters)
+    standard_lp = build_from_Abc(A, c, AL, AU, l, u, 0.0)
+    if params.use_presolve
+        return apply_pslp_presolve(standard_lp, params.verbose, params.time_limit)
+    end
+    return standard_lp
+end
+
+function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
+    c::Vector{Float64},
+    AL::Vector{Float64},
+    AU::Vector{Float64},
+    l::Vector{Float64},
+    u::Vector{Float64},
+    obj_constant::Float64,
+    params::HPRLP_parameters)
+    standard_lp = build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+    if params.use_presolve
+        return apply_pslp_presolve(standard_lp, params.verbose, params.time_limit)
+    end
+    return standard_lp
+end
+
 # the function to test the HPR-LP algorithm on a dataset
 function run_dataset(data_path::String, result_path::String, params::HPRLP_parameters)
     files = readdir(data_path)
@@ -637,7 +750,7 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                 t_start_all = time()
 
                 # Build and solve the model
-                model = build_from_mps(FILE_NAME, verbose=params.verbose)
+                model = build_from_mps(FILE_NAME, params)
                 results = solve(model, params)
 
                 all_time = time() - t_start_all

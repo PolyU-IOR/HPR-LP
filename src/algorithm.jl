@@ -173,6 +173,98 @@ function Halpern_update_cpu!(ws::HPRLP_workspace_cpu, restart_info::HPRLP_restar
     restart_info.inner += 1
 end
 
+function compute_original_kkt_metrics(
+    model::LP_info_cpu,
+    x::AbstractVector{<:Real},
+    y::AbstractVector{<:Real},
+    z::AbstractVector{<:Real},
+)
+    xh = x isa Vector{Float64} ? x : Array(x)
+    yh = y isa Vector{Float64} ? y : Array(y)
+    zh = z isa Vector{Float64} ? z : Array(z)
+
+    Ax = model.A * xh
+    ATy = model.AT * yh
+
+    sum_sq_b = 0.0
+    for val in model.AL
+        if isfinite(val)
+            sum_sq_b += val^2
+        end
+    end
+    for val in model.AU
+        if isfinite(val)
+            sum_sq_b += val^2
+        end
+    end
+    norm_b = 1.0 + sqrt(sum_sq_b)
+
+    sum_sq_c = 0.0
+    for val in model.c
+        if isfinite(val)
+            sum_sq_c += val^2
+        end
+    end
+    norm_c = 1.0 + sqrt(sum_sq_c)
+
+    err_Ax_sq = 0.0
+    for i in eachindex(Ax)
+        val = Ax[i]
+        lower = model.AL[i]
+        upper = model.AU[i]
+        err_Ax_sq += max(0.0, lower - val, val - upper)^2
+    end
+    err_Ax = sqrt(err_Ax_sq)
+
+    err_x_sq = 0.0
+    for j in eachindex(xh)
+        val = xh[j]
+        lower = model.l[j]
+        upper = model.u[j]
+        err_x_sq += max(0.0, lower - val, val - upper)^2
+    end
+    err_x = sqrt(err_x_sq)
+    primal_feas = max(err_Ax, err_x) / norm_b
+
+    dual_residual = model.c .- ATy .- zh
+    dual_feas = norm(dual_residual) / norm_c
+
+    p_lin = dot(model.c, xh)
+    d_lin = 0.0
+    delta_y = 0.0
+    delta_z = 0.0
+    eps_dual = 1e-12
+    inf_proxy = 1e100
+
+    for i in eachindex(yh)
+        yi = yh[i]
+        if abs(yi) <= eps_dual
+            continue
+        end
+        b_val = yi > 0 ? model.AL[i] : model.AU[i]
+        b_val = clamp(b_val, -inf_proxy, inf_proxy)
+        delta_y += yi * b_val
+        d_lin += yi * b_val
+    end
+
+    for j in eachindex(zh)
+        zj = zh[j]
+        if abs(zj) <= eps_dual
+            continue
+        end
+        b_val = zj > 0 ? model.l[j] : model.u[j]
+        b_val = clamp(b_val, -inf_proxy, inf_proxy)
+        delta_z += zj * b_val
+        d_lin += zj * b_val
+    end
+
+    gap = abs(d_lin - p_lin) / (1.0 + abs(d_lin) + abs(p_lin))
+    p_obj = p_lin + model.obj_constant
+    d_obj = d_lin + model.obj_constant
+
+    return p_obj, d_obj, primal_feas, dual_feas, gap, delta_y, delta_z
+end
+
 # the function to compute the residuals for the original LP problem
 function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     lp::LP_info_gpu,
@@ -1544,7 +1636,9 @@ result = solve(model, params)
 
 See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function solve(model::LP_info_cpu, params::HPRLP_parameters)
+function solve(model::LP_info_cpu, params::HPRLP_parameters, original_model::Union{Nothing,LP_info_cpu}=nothing)
+    reference_model = isnothing(original_model) ? model.original_model : original_model
+
     # Validate GPU parameters before attempting GPU operations
     if params.use_gpu
         validate_gpu_parameters!(params)
@@ -1684,6 +1778,46 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
                 println("="^80)
             end
             results = collect_results!(ws, residuals, scaling_info, iter, t_start_alg, power_time, status, tolerance_times, tolerance_iters)
+            if model.presolver_model !== nothing
+                presolver_model = model.presolver_model
+                if params.verbose
+                    println("\n", "="^80)
+                    println("PSLP POSTSOLVE")
+                    println("="^80)
+                end
+
+                try
+                    x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
+                    y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
+                    z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
+                    x_full, y_full, z_full = PSLP.postsolve(presolver_model, x_red, y_red, z_red)
+                    results.x = x_full
+                    results.y = y_full
+                    results.z = z_full
+                finally
+                    PSLP.free_presolver_wrapper(presolver_model)
+                    model.presolver_model = nothing
+                end
+
+                if reference_model !== nothing
+                    p_obj, d_obj, p_feas, d_feas, gap, delta_y, delta_z =
+                        compute_original_kkt_metrics(reference_model, results.x, results.y, results.z)
+
+                    if params.verbose
+                        println("-"^60)
+                        println("Original KKT Check:")
+                        println(@sprintf("  Original Primal Objective:   %.6e", p_obj))
+                        println(@sprintf("  Original Dual Objective:     %.6e", d_obj))
+                        println(@sprintf("  Original Primal Feasibility: %.6e", p_feas))
+                        println(@sprintf("  Original Dual Feasibility:   %.6e", d_feas))
+                        println(@sprintf("  Original Relative Gap:       %.6e", gap))
+                        # println(@sprintf("  Dual Objective (y-part):     %.6e", delta_y))
+                        # println(@sprintf("  Dual Objective (z-part):     %.6e", delta_z))
+                        println("-"^60)
+                    end
+                end
+            end
+
             return results
         end
 
