@@ -299,17 +299,25 @@ function postsolve_and_validate_original_kkt!(
         PSLP.free_presolver_wrapper(presolver_info)
     end
 
-    p_obj, d_obj, p_feas, d_feas, gap =
-        compute_original_kkt_metrics(original_model, results.x, results.y, results.z)
-    original_kkt_error = max(p_feas, d_feas, gap)
-    original_kkt_passed = original_kkt_error <= params.stoptol
+    if results.status == "OPTIMAL"
+        p_obj, d_obj, p_feas, d_feas, gap =
+            compute_original_kkt_metrics(original_model, results.x, results.y, results.z)
+        original_kkt_error = max(p_feas, d_feas, gap)
+        original_kkt_passed = original_kkt_error <= params.stoptol
 
-    if !original_kkt_passed
-        failure_reasons = check_org_recovery_failures(
-            p_feas, d_feas, gap, params.stoptol)
-        println("Postsolve original KKT check failed (but the primal solution and objective are reliable): $(join(failure_reasons, "; ")). stop_tolerance = $(params.stoptol) primal_objective = $(p_obj) dual_objective = $(d_obj) primal_feasibility = $(p_feas) dual_feasibility = $(d_feas) relative_gap = $(gap)")
-    elseif params.verbose
-        println("Postsolve original KKT check passed")
+        if !original_kkt_passed
+            failure_reasons = check_org_recovery_failures(
+                p_feas, d_feas, gap, params.stoptol)
+            if params.verbose
+                println("Postsolve original KKT check failed (but the primal solution and objective are reliable): $(join(failure_reasons, "; ")). stop_tolerance = $(params.stoptol) primal_objective = $(p_obj) dual_objective = $(d_obj) primal_feasibility = $(p_feas) dual_feasibility = $(d_feas) relative_gap = $(gap)")
+            end
+        elseif params.verbose
+            println("Postsolve original KKT check passed")
+        end
+    else
+        if params.verbose
+            println("Skipping postsolve original KKT check since the reduced solution is not optimal")
+        end
     end
 
     return nothing
@@ -630,7 +638,7 @@ function check_break(residuals::HPRLP_residuals,
     end
 
     if iter == params.max_iter
-        return "MAX_ITER"
+        return "ITER_LIMIT"
     end
 
     if elapsed_time > params.time_limit

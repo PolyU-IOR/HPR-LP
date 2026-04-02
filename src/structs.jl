@@ -132,7 +132,7 @@ Results from the HPR-LP solver.
 - `dual_residual::Float64`: Final dual feasibility residual
 - `relative_duality_gap::Float64`: Final relative duality gap
 - `x::Vector{Float64}`: Primal solution vector
-- `status::String`: Termination status ("Optimal", "TimeLimit", "IterationLimit")
+- `status::String`: Termination status ("OPTIMAL", "ITER_LIMIT", "TIME_LIMIT")
 
 # Example
 ```julia
