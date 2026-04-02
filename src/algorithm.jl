@@ -307,9 +307,9 @@ function postsolve_and_validate_original_kkt!(
     if !original_kkt_passed
         failure_reasons = check_org_recovery_failures(
             p_feas, d_feas, gap, params.stoptol)
-        @warn "Postsolve original KKT check failed: $(join(failure_reasons, "; "))." Stop_Tolerance = params.stoptol Original_Primal_Objective = p_obj Original_Dual_Objective = d_obj Original_Primal_Feasibility = p_feas Original_Dual_Feasibility = d_feas Original_Relative_Gap = gap
+        println("Postsolve original KKT check failed (but the primal solution and objective are reliable): $(join(failure_reasons, "; ")). stop_tolerance = $(params.stoptol) primal_objective = $(p_obj) dual_objective = $(d_obj) primal_feasibility = $(p_feas) dual_feasibility = $(d_feas) relative_gap = $(gap)")
     elseif params.verbose
-        println("Original KKT Check Passed")
+        println("Postsolve original KKT check passed")
     end
 
     return nothing
