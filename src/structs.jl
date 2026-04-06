@@ -30,7 +30,7 @@ Parameters for the HPR-LP solver.
 - `warm_up::Bool`: Enable warm-up phase (default: true)
 - `print_frequency::Int`: Print log every N iterations, -1 for auto (default: -1)
 - `verbose::Bool`: Enable verbose output (default: true)
-- `autotune_verbose::Bool`: Enable deterministic GPU autotune logging (default: false)
+- `autotune_verbose::Bool`: Enable customized GPU spmv autotune logging (default: false)
 - `initial_x::Union{Vector{Float64},Nothing}`: Initial primal solution (default: nothing)
 - `initial_y::Union{Vector{Float64},Nothing}`: Initial dual solution (default: nothing)
 - `auto_save::Bool`: Automatically save best x, y, and sigma during optimization (default: false)
@@ -89,7 +89,7 @@ mutable struct HPRLP_parameters
     # whether to print verbose output, default is true
     verbose::Bool
 
-    # whether to print deterministic autotune output, default is false
+    # whether to print customized GPU spmv autotune logging, default is false
     autotune_verbose::Bool
 
     # initial primal solution, default is nothing
@@ -380,9 +380,6 @@ mutable struct HPRLP_workspace_gpu
 
     # Normally used to store the vector y that the algorithm restarted last time
     last_y::CuVector{Float64}
-
-    # Whether to use the experimental deterministic fused CSR normal-update path.
-    use_custom_deterministic_fused::Bool
 
     # Whether to use custom fused x_z normal update (otherwise cuSPARSE path).
     use_custom_fused_x::Bool

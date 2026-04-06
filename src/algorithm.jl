@@ -620,17 +620,7 @@ function prepare_spmv!(A::CuSparseMatrixCSR{Float64,Int32}, AT::CuSparseMatrixCS
     return spmv_A, spmv_AT
 end
 
-@inline deterministic_probe_iterations() = 150
-
-@inline function deterministic_probe_candidates()
-    candidates = [(use_x=false, use_y=false)]
-    push!(candidates, (use_x=true, use_y=false))
-    push!(candidates, (use_x=false, use_y=true))
-    push!(candidates, (use_x=true, use_y=true))
-    return candidates
-end
-
-@inline function choose_deterministic_probe_backend(
+@inline function choose_customized_spmv(
     ref_metric::Float64,
     ref_time_ns::Integer,
     candidate_results::AbstractVector{<:NamedTuple};
@@ -710,7 +700,6 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     ws.Ax = CUDA.zeros(Float64, m)
     ws.last_x = CUDA.zeros(Float64, n)
     ws.last_y = CUDA.zeros(Float64, m)
-    ws.use_custom_deterministic_fused = !params.CUSPARSE_spmv
     ws.use_custom_fused_x = false
     ws.use_custom_fused_y = false
     ws.x_bound_type = CuArray(UInt8[])
@@ -724,7 +713,7 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
         ws.sigma = 1.0
     end
 
-    if ws.use_custom_deterministic_fused
+    if !params.CUSPARSE_spmv
         ws.x_bound_type = CUDA.zeros(UInt8, n)
         ws.y_bound_type = CUDA.zeros(UInt8, m)
         @. ws.x_bound_type = ifelse((ws.l <= -1e90) & (ws.u >= 1e90), UInt8(0),
@@ -1210,16 +1199,16 @@ end
 end
 
 function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_gpu, sc::Scaling_info_gpu, params::HPRLP_parameters)
-    if !ws.use_custom_deterministic_fused
+    if params.CUSPARSE_spmv
         ws.use_custom_fused_x = false
         ws.use_custom_fused_y = false
         return
     end
-    candidates = deterministic_probe_candidates()
+    candidates = [(use_x=false, use_y=false), (use_x=true, use_y=false), (use_x=false, use_y=true), (use_x=true, use_y=true)]
 
-    bench_iters = min(params.max_iter, deterministic_probe_iterations())
+    bench_iters = min(params.max_iter, params.check_iter)
     if params.autotune_verbose
-        println("AUTO-SELECT custom backends (", bench_iters, " deterministic iterations per candidate) ...")
+        println("AUTO-SELECT custom backends (", bench_iters, " iterations per candidate) ...")
         n_A_short = length(ws.A_rows_short)
         n_A_medium = length(ws.A_rows_medium)
         n_A_total = n_A_short + n_A_medium
@@ -1322,7 +1311,7 @@ function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_g
             time_ns=candidate_results[(candidate.use_x, candidate.use_y)][2])
         for candidate in candidates if candidate != (use_x=false, use_y=false)
     ]
-    decision = choose_deterministic_probe_backend(ref_metric, ref_t, fused_candidates)
+    decision = choose_customized_spmv(ref_metric, ref_t, fused_candidates)
 
     restore_state!()
     ws.use_custom_fused_x = decision.use_x
@@ -1624,8 +1613,9 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
             residuals_refreshed = true
         elseif print_yes
             compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info, false)
-            # residuals_to_print = residuals
+            residuals_refreshed = true
         end
+
         if params.use_gpu && ws.pending_last_gap && periodic_check
             consume_pending_last_gap_gpu!(ws, restart_info)
         end
@@ -1704,11 +1694,11 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
 
         # Determine whether to compute bar points for residuals
         ws.to_check = (rem(iter + 1, params.check_iter) == 0) || (restart_info.restart_flag > 0)
-        # if params.print_frequency == -1
-        #     ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter + 1)) == 0)
-        # elseif params.print_frequency > 0
-        #     ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
-        # end
+        if params.print_frequency == -1
+            ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter + 1)) == 0)
+        elseif params.print_frequency > 0
+            ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
+        end
         if params.use_gpu
             uploaded_sigma, uploaded_lambda_max = upload_halpern_iter_params_if_needed!(
                 ws, iter_params_host, uploaded_sigma, uploaded_lambda_max)

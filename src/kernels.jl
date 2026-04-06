@@ -353,7 +353,7 @@ function update_x_z_check_gpu!(ws::HPRLP_workspace_gpu)
 end
 
 function update_x_z_normal_gpu!(ws::HPRLP_workspace_gpu)
-    if ws.use_custom_deterministic_fused && ws.use_custom_fused_x
+    if ws.use_custom_fused_x
         update_x_z_normal_fused_bucket_gpu!(ws)
         return
     end
@@ -494,7 +494,7 @@ function update_y_check_gpu!(ws::HPRLP_workspace_gpu)
 end
 
 function update_y_normal_gpu!(ws::HPRLP_workspace_gpu)
-    if ws.use_custom_deterministic_fused && ws.use_custom_fused_y
+    if ws.use_custom_fused_y
         update_y_normal_fused_bucket_gpu!(ws)
         return
     end

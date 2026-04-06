@@ -11,6 +11,32 @@ const SCALAR_SETS = Union{
     MOI.Interval{Float64},
 }
 
+# Define the product of sets for the MOI cache model.
+MOI.Utilities.@product_of_sets(
+    LPSets,
+    MOI.EqualTo{T},
+    MOI.LessThan{T},
+    MOI.GreaterThan{T},
+    MOI.Interval{T},
+)
+
+# Define the cache type with MatrixOfConstraints (same approach as Clp.jl).
+const OptimizerCache = MOI.Utilities.GenericModel{
+    Float64,
+    MOI.Utilities.ObjectiveContainer{Float64},
+    MOI.Utilities.VariablesContainer{Float64},
+    MOI.Utilities.MatrixOfConstraints{
+        Float64,
+        MOI.Utilities.MutableSparseMatrixCSC{
+            Float64,
+            Int,
+            MOI.Utilities.OneBasedIndexing,
+        },
+        MOI.Utilities.Hyperrectangle{Float64},
+        LPSets{Float64},
+    },
+}
+
 """
     Optimizer()
 
