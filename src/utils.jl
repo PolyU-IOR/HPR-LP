@@ -462,7 +462,7 @@ params = HPRLP_parameters()
 result = optimize(model, params)
 ```
 
-See also: [`build_from_mps`](@ref), [`optimize`](@ref)
+See also: [`optimize`](@ref)
 """
 function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     c::Vector{Float64},

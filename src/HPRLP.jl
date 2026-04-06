@@ -27,6 +27,6 @@ export Optimizer
 
 # Export main functions and types for direct API usage
 export HPRLP_parameters, HPRLP_results
-export build_from_mps, build_from_Abc, optimize
+export build_from_Abc, optimize
 
 end

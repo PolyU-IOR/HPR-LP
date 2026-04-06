@@ -1,21 +1,27 @@
 # Solving MPS Files
 
-HPRLP can directly read and solve linear programming problems in MPS (Mathematical Programming System) format, a widely-used industry standard format.
+HPRLP solves MPS (Mathematical Programming System) models through JuMP's file reader. This is the recommended path after removal of the old `build_from_mps` helper.
 
 ## Quick Start
 
 ```julia
-using HPRLP
+using JuMP, HPRLP
 
-# Step 1: Build model from MPS file
-model = build_from_mps("path/to/problem.mps")
+# Step 1: Read model from MPS file
+model = read_from_file("path/to/problem.mps")
 
-# Step 2: Configure solver parameters
-params = HPRLP_parameters()
-params.stoptol = 1e-4
+# Step 2: Attach HPRLP
+set_optimizer(model, HPRLP.Optimizer)
 
-# Step 3: Optimize
-result = optimize(model, params)
+# Step 3: Configure solver parameters
+set_attribute(model, "stoptol", 1e-4)
+set_attribute(model, "use_gpu", true)
+
+# Step 4: Optimize
+optimize!(model)
+
+# Optional: access the HPRLP-specific result struct
+result = unsafe_backend(model).results
 ```
 
 ## Working with MPS Files
@@ -23,16 +29,22 @@ result = optimize(model, params)
 ### Basic Usage
 
 ```julia
-using HPRLP
+using JuMP, HPRLP
 
-# Build the model
-model = build_from_mps("model.mps")
+# Read the model
+model = read_from_file("model.mps")
 
-# Set up parameters
-params = HPRLP_parameters()
+# Attach HPRLP
+set_optimizer(model, HPRLP.Optimizer)
+
+# Set up solver attributes
+set_attribute(model, "stoptol", 1e-4)
+set_attribute(model, "use_gpu", true)
 
 # Solve
-result = optimize(model, params)
+optimize!(model)
+
+result = unsafe_backend(model).results
 
 if result.status == "OPTIMAL"
     println("Found optimal solution!")
@@ -46,19 +58,25 @@ end
 ### With Custom Parameters
 
 ```julia
-# Build model
-model = build_from_mps("large_problem.mps")
+using JuMP, HPRLP
 
-# Configure parameters
-params = HPRLP_parameters()
-params.stoptol = 1e-9          # Higher accuracy
-params.time_limit = 3600       # 1 hour time limit
-params.use_gpu = true          # Enable GPU
-params.verbose = true          # Show progress
-params.warm_up = true          # Enable warmup for accurate timing
+# Read model
+model = read_from_file("large_problem.mps")
+
+# Attach HPRLP
+set_optimizer(model, HPRLP.Optimizer)
+
+# Configure attributes
+set_attribute(model, "stoptol", 1e-9)      # Higher accuracy
+set_attribute(model, "time_limit", 3600.0) # 1 hour time limit
+set_attribute(model, "use_gpu", true)      # Enable GPU
+set_attribute(model, "verbose", true)      # Show progress
+set_attribute(model, "warm_up", true)      # Enable warmup for accurate timing
 
 # Solve
-result = optimize(model, params)
+optimize!(model)
+
+result = unsafe_backend(model).results
 ```
 
 !!! tip "Parameter Reference"

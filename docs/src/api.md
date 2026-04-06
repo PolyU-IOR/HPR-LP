@@ -7,7 +7,6 @@ Complete API documentation for HPRLP. For detailed guides, see:
 ## Main Functions
 
 ```@docs
-build_from_mps
 build_from_Abc
 optimize
 HPRLP.Optimizer
@@ -37,16 +36,21 @@ params.stoptol = 1e-6
 result = optimize(model, params)
 ```
 
-**MPS Files:**
+**MPS Files via JuMP:**
 ```julia
-# Step 1: Build the model from file
-model = build_from_mps("problem.mps")
+# Step 1: Read the model from file
+using JuMP
+model = read_from_file("problem.mps")
 
-# Step 2: Set parameters
-params = HPRLP_parameters()
+# Step 2: Attach HPRLP
+set_optimizer(model, HPRLP.Optimizer)
 
-# Step 3: Optimize
-result = optimize(model, params)
+# Step 3: Set solver attributes
+set_attribute(model, "stoptol", 1e-6)
+set_attribute(model, "use_gpu", true)
+
+# Step 4: Optimize
+optimize!(model)
 ```
 
 **JuMP:**

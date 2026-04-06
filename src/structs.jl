@@ -132,7 +132,7 @@ Results from the HPR-LP solver.
 
 # Example
 ```julia
-model = build_from_mps("problem.mps")
+model = build_from_Abc(A, c, AL, AU, l, u)
 params = HPRLP_parameters()
 results = solve(model, params)
 println("Status: ", results.status)

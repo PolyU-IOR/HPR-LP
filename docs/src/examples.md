@@ -47,19 +47,23 @@ println("Solution: x₁ = ", result.x[1], ", x₂ = ", result.x[2])
 Read and solve a problem from an MPS file.
 
 ```julia
-using HPRLP
+using JuMP, HPRLP
 
-# Build model from file
-model = build_from_mps("problem.mps")
+# Read model from file
+model = read_from_file("problem.mps")
 
-# Configure parameters
-params = HPRLP_parameters()
-params.stoptol = 1e-6
-params.use_gpu = true
-params.verbose = true
+# Attach HPRLP
+set_optimizer(model, HPRLP.Optimizer)
+
+# Configure attributes
+set_attribute(model, "stoptol", 1e-6)
+set_attribute(model, "use_gpu", true)
+set_attribute(model, "verbose", true)
 
 # Solve
-result = optimize(model, params)
+optimize!(model)
+
+result = unsafe_backend(model).results
 
 if result.status == "OPTIMAL"
     println("✓ Optimal solution found!")
@@ -124,16 +128,16 @@ result2 = optimize(model2, params)
 Enable auto-save for long optimizations.
 
 ```julia
-using HPRLP
+using JuMP, HPRLP
 
-model = build_from_mps("large_problem.mps")
+model = read_from_file("large_problem.mps")
+set_optimizer(model, HPRLP.Optimizer)
 
-params = HPRLP_parameters()
-params.time_limit = 3600
-params.auto_save = true
-params.save_filename = "best_solution.h5"
+set_attribute(model, "time_limit", 3600.0)
+set_attribute(model, "use_gpu", true)
+set_attribute(model, "verbose", true)
 
-result = optimize(model, params)
+optimize!(model)
 ```
 
 ## Example 6: Reading Auto-Saved Results

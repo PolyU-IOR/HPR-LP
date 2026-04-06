@@ -1,5 +1,6 @@
 using Test
 using HPRLP
+using JuMP
 using SparseArrays
 using LinearAlgebra
 
@@ -10,15 +11,17 @@ using LinearAlgebra
         mps_file = joinpath(@__DIR__, "..", "model.mps")
         
         if isfile(mps_file)
-            params = HPRLP.HPRLP_parameters()
-            params.time_limit = 60
-            params.stoptol = 1e-4
-            params.use_gpu = false  # CPU for testing
-            params.warm_up = false
-            params.verbose = false  # Silent mode for tests
-            
-            model = HPRLP.build_from_mps(mps_file, verbose=false)
-            result = HPRLP.optimize(model, params)
+            model = read_from_file(mps_file)
+            set_optimizer(model, HPRLP.Optimizer)
+
+            set_attribute(model, "time_limit", 60.0)
+            set_attribute(model, "stoptol", 1e-4)
+            set_attribute(model, "use_gpu", false)  # CPU for testing
+            set_attribute(model, "warm_up", false)
+            set_attribute(model, "verbose", false)  # Silent mode for tests
+
+            optimize!(model)
+            result = unsafe_backend(model).results
             
             @test result.status == "OPTIMAL"
             # Problem: min -3x1 - 5x2, s.t. x1+2x2<=10, 3x1+x2<=12, x1,x2>=0

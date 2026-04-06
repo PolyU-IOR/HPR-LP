@@ -127,15 +127,27 @@ println("Solve time: ", solve_time(model), " seconds")
 
 ```julia
 using HPRLP
+using JuMP
 
-# Build model from file
-model = build_from_mps("model.mps")
+# Read model from file
+model = read_from_file("model.mps")
 
-# Set parameters
-params = HPRLP_parameters()
+# Attach HPRLP as the optimizer
+set_optimizer(model, HPRLP.Optimizer)
+
+# Set optimizer attributes
+set_attribute(model, "stoptol", 1e-4)
+set_attribute(model, "use_gpu", true)
 
 # Solve
-result = optimize(model, params)
+optimize!(model)
+
+# Access JuMP results
+println("Status: ", termination_status(model))
+println("Objective: ", objective_value(model))
+
+# Access the HPRLP-specific result struct if needed
+result = unsafe_backend(model).results
 ```
 
 ## Next Steps

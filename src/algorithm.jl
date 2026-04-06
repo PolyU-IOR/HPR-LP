@@ -1421,7 +1421,7 @@ Optimize a linear program using the HPR-LP algorithm.
 This function handles GPU transfer, scaling, and optional warmup internally based on the parameters.
 
 # Arguments
-- `model::LP_info_cpu`: LP model built from `build_from_mps` or `build_from_Abc`
+- `model::LP_info_cpu`: LP model built from `build_from_Abc` or another constructor that returns `LP_info_cpu`
 - `params::HPRLP_parameters`: Solver parameters
 
 # Returns
@@ -1431,7 +1431,7 @@ This function handles GPU transfer, scaling, and optional warmup internally base
 ```julia
 using HPRLP
 
-model = build_from_mps("problem.mps")
+model = build_from_Abc(A, c, AL, AU, l, u)
 params = HPRLP_parameters()
 params.stoptol = 1e-6
 params.use_gpu = true
@@ -1442,7 +1442,7 @@ println("Status: ", result.status)
 println("Objective: ", result.primal_obj)
 ```
 
-See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
+See also: [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
 """
 function optimize(model::LP_info_cpu, params::HPRLP_parameters)
     # Handle warmup if requested
@@ -1531,7 +1531,7 @@ params.use_gpu = true
 result = solve(model, params)
 ```
 
-See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`optimize`](@ref)
+See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
 function solve(model::LP_info_cpu, params::HPRLP_parameters)
     # Validate GPU parameters before attempting GPU operations

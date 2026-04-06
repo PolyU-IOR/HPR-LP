@@ -45,10 +45,10 @@ optimize!(model)
 **Example use case:** Solving benchmark problems from the NETLIB test set or problems exported from commercial optimization software.
 
 ```julia
-using HPRLP
-model = build_from_mps("path/to/problem.mps")
-params = HPRLP_parameters()
-result = optimize(model, params)
+using JuMP, HPRLP
+model = read_from_file("path/to/problem.mps")
+set_optimizer(model, HPRLP.Optimizer)
+optimize!(model)
 ```
 
 [→ See MPS Files Guide](mps_files.md)
@@ -103,5 +103,5 @@ Regardless of input method, HPRLP internally solves problems in the standard for
 ```
 
 - **JuMP** automatically converts your model to this form
-- **MPS files** are parsed into this representation  
+- **MPS files** are read through JuMP and then converted into this representation  
 - **Direct API** lets you specify this form directly
