@@ -408,6 +408,8 @@ function power_iteration_cpu(A::SparseMatrixCSC, AT::SparseMatrixCSC,
     z = Vector(randn(Random.MersenneTwister(seed), m)) .+ 1e-8 # Initial random vector
     q = zeros(Float64, m)
     ATq = zeros(Float64, n)
+    error = Inf
+    lambda_max = 1.0
     for i in 1:max_iterations
         z2 = dot(z, z)
         invn = inv(sqrt(z2 + eps(Float64)))
@@ -424,7 +426,7 @@ function power_iteration_cpu(A::SparseMatrixCSC, AT::SparseMatrixCSC,
         end
     end
     println("Power iteration did not converge within the specified tolerance.")
-    println("The maximum iteration is ", max_iterations, " and the error is ", norm(q))
+    println("The maximum iteration is ", max_iterations, " and the error is ", error)
     return lambda_max
 end
 
