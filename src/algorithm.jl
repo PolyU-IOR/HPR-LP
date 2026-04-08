@@ -187,11 +187,15 @@ function compute_original_kkt_metrics(
     AUh = copy(model.AU)
     lh = copy(model.l)
     uh = copy(model.u)
+    AL_nInf = copy(model.AL)
+    AU_nInf = copy(model.AU)
 
     ALh[ALh.==-Inf] .= -1.0e100
     AUh[AUh.==Inf] .= 1.0e100
     lh[lh.==-Inf] .= -1.0e100
     uh[uh.==Inf] .= 1.0e100
+    AL_nInf[AL_nInf.==-Inf] .= 0.0
+    AU_nInf[AU_nInf.==Inf] .= 0.0
 
     @. yh = ifelse((AUh .== 1e100) & (ALh .== -1e100), 0.0,
         ifelse(AUh .== 1e100, max(yh, 0.0),
@@ -204,26 +208,9 @@ function compute_original_kkt_metrics(
     Ax = model.A * xh
     ATy = model.AT * yh
 
-    sum_sq_b = 0.0
-    for val in model.AL
-        if isfinite(val)
-            sum_sq_b += val^2
-        end
-    end
-    for val in model.AU
-        if isfinite(val)
-            sum_sq_b += val^2
-        end
-    end
-    norm_b = 1.0 + sqrt(sum_sq_b)
+    norm_b = 1.0 + norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
 
-    sum_sq_c = 0.0
-    for val in model.c
-        if isfinite(val)
-            sum_sq_c += val^2
-        end
-    end
-    norm_c = 1.0 + sqrt(sum_sq_c)
+    norm_c = 1.0 + norm(model.c)
 
     err_Ax_sq = 0.0
     for i in eachindex(Ax)
