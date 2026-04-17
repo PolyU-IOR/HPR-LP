@@ -1204,11 +1204,10 @@ function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_g
         ws.use_custom_fused_y = false
         return
     end
-    candidates = [(use_x=false, use_y=false), (use_x=true, use_y=false), (use_x=false, use_y=true), (use_x=true, use_y=true)]
-
     bench_iters = min(params.max_iter, params.check_iter)
     if params.autotune_verbose
-        println("AUTO-SELECT custom backends (", bench_iters, " iterations per candidate) ...")
+        println("AUTO-SELECT custom backends (x/y benchmarked independently, ", bench_iters,
+            " normal iterations + 1 check) ...")
         n_A_short = length(ws.A_rows_short)
         n_A_medium = length(ws.A_rows_medium)
         n_A_total = n_A_short + n_A_medium
@@ -1263,14 +1262,26 @@ function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_g
         CUDA.synchronize()
     end
 
-    function run_candidate_probe!(use_x::Bool, use_y::Bool, iters::Int)
+    function run_x_probe!(use_x::Bool, iters::Int)
         ws.use_custom_fused_x = use_x
-        ws.use_custom_fused_y = use_y
+        ws.use_custom_fused_y = false
         for _ in 1:iters
             update_x_z_normal_gpu!(ws)
-            update_y_normal_gpu!(ws)
         end
         update_x_z_check_gpu!(ws)
+        tmp_res = HPRLP_residuals()
+        tmp_restart = initialize_restart(ws.sigma)
+        compute_residuals_gpu!(ws, lp, sc, tmp_res, iters, params, tmp_restart)
+        CUDA.synchronize()
+        return tmp_res.KKTx_and_gap_org_bar
+    end
+
+    function run_y_probe!(use_y::Bool, iters::Int)
+        ws.use_custom_fused_x = false
+        ws.use_custom_fused_y = use_y
+        for _ in 1:iters
+            update_y_normal_gpu!(ws)
+        end
         update_y_check_gpu!(ws)
         tmp_res = HPRLP_residuals()
         tmp_restart = initialize_restart(ws.sigma)
@@ -1279,50 +1290,75 @@ function autotune_custom_update_backends!(ws::HPRLP_workspace_gpu, lp::LP_info_g
         return tmp_res.KKTx_and_gap_org_bar
     end
 
-    function eval_candidate(use_x::Bool, use_y::Bool, iters::Int)
+    function eval_x_backend(use_x::Bool, iters::Int)
         restore_state!()
-        run_candidate_probe!(use_x, use_y, iters)
+        run_x_probe!(use_x, iters)
         restore_state!()
         CUDA.synchronize()
         t0 = time_ns()
-        metric = run_candidate_probe!(use_x, use_y, iters)
+        metric = run_x_probe!(use_x, iters)
         CUDA.synchronize()
         dt = time_ns() - t0
         return metric, dt
     end
 
-    candidate_results = Dict{Tuple{Bool,Bool},Tuple{Float64,Int64}}()
-    for candidate in candidates
-        metric, dt = eval_candidate(candidate.use_x, candidate.use_y, bench_iters)
-        candidate_results[(candidate.use_x, candidate.use_y)] = (metric, dt)
+    function eval_y_backend(use_y::Bool, iters::Int)
+        restore_state!()
+        run_y_probe!(use_y, iters)
+        restore_state!()
+        CUDA.synchronize()
+        t0 = time_ns()
+        metric = run_y_probe!(use_y, iters)
+        CUDA.synchronize()
+        dt = time_ns() - t0
+        return metric, dt
+    end
+
+    x_results = Dict{Bool,Tuple{Float64,Int64}}()
+    for use_x in (false, true)
+        metric, dt = eval_x_backend(use_x, bench_iters)
+        x_results[use_x] = (metric, dt)
         if params.autotune_verbose
-            println("  candidate x=", candidate.use_x ? "fused" : "cusparse",
-                ", y=", candidate.use_y ? "fused" : "cusparse",
+            println("  x backend=", use_x ? "fused" : "cusparse",
                 " -> ", round(dt / 1e6; digits=3), " ms",
                 ", merit=", metric)
         end
     end
 
-    ref_metric, ref_t = candidate_results[(false, false)]
-    fused_candidates = [
-        (use_x=candidate.use_x,
-            use_y=candidate.use_y,
-            metric=candidate_results[(candidate.use_x, candidate.use_y)][1],
-            time_ns=candidate_results[(candidate.use_x, candidate.use_y)][2])
-        for candidate in candidates if candidate != (use_x=false, use_y=false)
-    ]
-    decision = choose_customized_spmv(ref_metric, ref_t, fused_candidates)
+    y_results = Dict{Bool,Tuple{Float64,Int64}}()
+    for use_y in (false, true)
+        metric, dt = eval_y_backend(use_y, bench_iters)
+        y_results[use_y] = (metric, dt)
+        if params.autotune_verbose
+            println("  y backend=", use_y ? "fused" : "cusparse",
+                " -> ", round(dt / 1e6; digits=3), " ms",
+                ", merit=", metric)
+        end
+    end
+
+    x_ref_metric, x_ref_t = x_results[false]
+    x_decision = choose_customized_spmv(x_ref_metric, x_ref_t,
+        [(use_x=true, use_y=false, metric=x_results[true][1], time_ns=x_results[true][2])])
+
+    y_ref_metric, y_ref_t = y_results[false]
+    y_decision = choose_customized_spmv(y_ref_metric, y_ref_t,
+        [(use_x=false, use_y=true, metric=y_results[true][1], time_ns=y_results[true][2])])
 
     restore_state!()
-    ws.use_custom_fused_x = decision.use_x
-    ws.use_custom_fused_y = decision.use_y
+    ws.use_custom_fused_x = x_decision.use_x
+    ws.use_custom_fused_y = y_decision.use_y
 
     if params.autotune_verbose
-        selected_metric, selected_t = candidate_results[(decision.use_x, decision.use_y)]
-        println("AUTO-SELECT selected x=", decision.use_x ? "fused" : "cusparse",
-            ", y=", decision.use_y ? "fused" : "cusparse",
-            " (", round(selected_t / 1e6; digits=3), " ms, merit=", selected_metric,
-            ", reason=", decision.reason, ")")
+        selected_x_metric, selected_x_t = x_results[ws.use_custom_fused_x]
+        selected_y_metric, selected_y_t = y_results[ws.use_custom_fused_y]
+        println("AUTO-SELECT x backend=", ws.use_custom_fused_x ? "fused" : "cusparse",
+            " (", round(selected_x_t / 1e6; digits=3), " ms, merit=", selected_x_metric,
+            ", reason=", x_decision.reason, ")")
+        println("AUTO-SELECT y backend=", ws.use_custom_fused_y ? "fused" : "cusparse",
+            " (", round(selected_y_t / 1e6; digits=3), " ms, merit=", selected_y_metric,
+            ", reason=", y_decision.reason, ")")
+        println("AUTO-SELECT final x=", ws.use_custom_fused_x ? "fused" : "cusparse",
+            ", y=", ws.use_custom_fused_y ? "fused" : "cusparse")
     end
     return
 end
