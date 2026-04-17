@@ -21,8 +21,8 @@ include("utils.jl")
 include("kernels.jl")
 include("algorithm.jl")
 include("MOI_wrapper.jl")
-include("PSLP.jl")
-using .PSLP
+include("GPUPresolve.jl")
+using .GPUPresolve
 
 # Export the Optimizer for JuMP usage
 export Optimizer

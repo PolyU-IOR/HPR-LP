@@ -265,12 +265,13 @@ end
 function postsolve_and_validate_original_kkt!(
     results::HPRLP_results,
     original_model::LP_info_cpu,
-    presolver_info,
+    presolve_state,
     params::HPRLP_parameters,
+    presolve_params=nothing,
 )
     if params.verbose
         println("\n", "="^80)
-        println("PSLP POSTSOLVE")
+        println("GPU POSTSOLVE")
         println("="^80)
     end
 
@@ -278,12 +279,18 @@ function postsolve_and_validate_original_kkt!(
         x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
         y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
         z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
-        x_org, y_org, z_org = PSLP.postsolve(presolver_info, x_red, y_red, z_red)
+        x_org, y_org, z_org = GPUPresolve.run_postsolve(
+            presolve_state,
+            x_red,
+            y_red,
+            z_red;
+            presolve_params=presolve_params,
+        )
         results.x = x_org
         results.y = y_org
         results.z = z_org
     finally
-        PSLP.free_presolver_wrapper(presolver_info)
+        GPUPresolve.free_presolve_state!(presolve_state)
     end
 
     if results.status == "OPTIMAL"
@@ -1168,6 +1175,8 @@ function setup_gpu_model(model::LP_info_cpu, params::HPRLP_parameters)
         CuVector(model.l),
         CuVector(model.u),
         model.obj_constant,
+        Int32(0),
+        CUDA.zeros(Int32, size(model.AT, 1)),
     )
     CUDA.synchronize()
 
@@ -1598,11 +1607,17 @@ println("Objective: ", result.primal_obj)
 
 See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
 """
-function optimize(model::LP_info_cpu, params::HPRLP_parameters)
+function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+    presolve_state = nothing
+
     # Presolve if requested
     if params.use_presolve
         original_model = model
-        model, presolver_info = apply_pslp_presolve(original_model, params.verbose)
+        model, presolve_state = apply_gpu_presolve(
+            original_model,
+            params;
+            presolve_params=presolve_params,
+        )
     end
 
     # Handle warmup if requested
@@ -1661,11 +1676,30 @@ function optimize(model::LP_info_cpu, params::HPRLP_parameters)
         println("="^80)
     end
 
-    if presolver_info !== nothing
-        postsolve_and_validate_original_kkt!(results, original_model, presolver_info, params)
+    if presolve_state !== nothing
+        postsolve_and_validate_original_kkt!(
+            results,
+            original_model,
+            presolve_state,
+            params,
+            presolve_params,
+        )
     end
 
     return results
+end
+
+function optimize(model::LP_info_cpu, params::HPRLP_parameters)
+    return _optimize_impl(model, params)
+end
+
+function optimize(
+    model::LP_info_cpu,
+    params::HPRLP_parameters,
+    _original_model;
+    presolve_params=nothing,
+)
+    return _optimize_impl(model, params; presolve_params=presolve_params)
 end
 
 """
@@ -1857,11 +1891,11 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
 
         # Determine whether to compute bar points for residuals
         ws.to_check = (rem(iter + 1, params.check_iter) == 0) || (restart_info.restart_flag > 0)
-        # if params.print_frequency == -1
-        #     ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter + 1)) == 0)
-        # elseif params.print_frequency > 0
-        #     ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
-        # end
+        if params.print_frequency == -1
+            ws.to_check = ws.to_check || (rem(iter + 1, print_step(iter + 1)) == 0)
+        elseif params.print_frequency > 0
+            ws.to_check = ws.to_check || (rem(iter + 1, params.print_frequency) == 0)
+        end
         if params.use_gpu
             uploaded_sigma, uploaded_lambda_max = upload_halpern_iter_params_if_needed!(
                 ws, iter_params_host, uploaded_sigma, uploaded_lambda_max)

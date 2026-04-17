@@ -35,7 +35,7 @@ Parameters for the HPR-LP solver.
 - `initial_y::Union{Vector{Float64},Nothing}`: Initial dual solution (default: nothing)
 - `auto_save::Bool`: Automatically save best x, y, and sigma during optimization (default: false)
 - `save_filename::String`: Filename for auto-save HDF5 file (default: "hprlp_autosave.h5")
-- `use_presolve::Bool`: Enable PSLP presolve before the main HPR-LP solve (default: false)
+- `use_presolve::Bool`: Enable the GPU presolve backend before the main HPR-LP solve (default: true)
 
 # Example
 ```julia
@@ -105,7 +105,7 @@ mutable struct HPRLP_parameters
     # filename for auto-save HDF5 file, default is "hprlp_autosave.h5"
     save_filename::String
 
-    # whether to use PSLP presolve or not, default is false
+    # whether to use the GPU presolve backend or not, default is false
     use_presolve::Bool
 
     # Default constructor
@@ -563,6 +563,8 @@ mutable struct LP_info_gpu
     l::CuVector{Float64}
     u::CuVector{Float64}
     obj_constant::Float64
+    AT_leading_slack::Int32
+    AT_slack_after::CuVector{Int32}
 end
 
 # the space for the scaling information on the CPU

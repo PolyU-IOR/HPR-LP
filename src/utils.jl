@@ -12,45 +12,37 @@ function formulation(A, c, AL, AU, l, u, obj_constant)
     return standard_lp
 end
 
-function apply_pslp_presolve(model::LP_info_cpu, verbose::Bool)
-    if verbose
-        println("PSLP PRESOLVE ...")
+function apply_gpu_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+    if params.verbose
+        println("GPU PRESOLVE ...")
     end
     t_start = time()
 
-    settings = PSLP.Settings(verbose=verbose)
-    presolver_info, reduced_data = PSLP.load_and_run_presolve(
-        model.c,
-        model.A,
-        model.l,
-        model.u,
-        model.AL,
-        model.AU;
-        settings=settings,
+    settings = GPUPresolve.Settings(
+        verbose=params.verbose,
+        device_number=params.device_number,
+        presolve_params=presolve_params,
     )
+    presolve_state, reduced_model = GPUPresolve.run_presolve(model; settings=settings)
 
-    if verbose
-        println(@sprintf("PSLP PRESOLVE time: %.2f seconds", time() - t_start))
+    if params.verbose
+        println(@sprintf("GPU PRESOLVE time: %.2f seconds", time() - t_start))
     end
 
-    if reduced_data === nothing || presolver_info === nothing
-        println("PSLP presolve failed or returned nothing.")
-        if presolver_info !== nothing
-            PSLP.free_presolver_wrapper(presolver_info)
+    if reduced_model === nothing || presolve_state === nothing
+        println("GPU presolve failed or returned nothing.")
+        if presolve_state !== nothing
+            GPUPresolve.free_presolve_state!(presolve_state)
         end
         return model, nothing
     end
 
-    c_red, A_red, l_red, u_red, lhs_red, rhs_red, obj_offset = reduced_data
-
-    if verbose
-        println("PSLP reduced size: $(size(model.A)) -> $(size(A_red))")
-        println("PSLP objective offset: $(obj_offset)")
+    if params.verbose
+        println("GPU presolve reduced size: $(size(model.A)) -> $(size(reduced_model.A))")
+        println("GPU presolve objective offset: $(reduced_model.obj_constant - model.obj_constant)")
     end
 
-    reduced_model = formulation(A_red, c_red, lhs_red, rhs_red, l_red, u_red, obj_offset)
-
-    return reduced_model, presolver_info
+    return reduced_model, presolve_state
 end
 
 # Helper function to create scaling info and apply scaling to the LP problem
