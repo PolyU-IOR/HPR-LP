@@ -122,10 +122,12 @@ end
 
 function _kernel_replay_parallel_col!(
     x_org,
+    z_org,
     tape_idx,
     tape_val,
     idx_start,
     val_start,
+    tol,
 )
     if threadIdx().x == 1
         idx0 = Int(idx_start)
@@ -140,26 +142,17 @@ function _kernel_replay_parallel_col!(
         to_u = @inbounds tape_val[val0 + 4]
 
         y_val = @inbounds x_org[to_idx]
-
-        if isfinite(to_u)
-            bound = (y_val - to_u) / ratio
-            if ratio > 0.0
-                lo = max(lo, bound)
-            else
-                hi = min(hi, bound)
-            end
-        end
-        if isfinite(to_l)
-            bound = (y_val - to_l) / ratio
-            if ratio > 0.0
-                hi = min(hi, bound)
-            else
-                lo = max(lo, bound)
-            end
-        end
-
-        x_from = _choose_merged_source_value(lo, hi)
-        x_to = y_val - ratio * x_from
+        z_to = length(z_org) > 0 ? @inbounds(z_org[to_idx]) : 0.0
+        x_from, x_to = _recover_parallel_col_primal(
+            y_val,
+            z_to,
+            ratio,
+            lo,
+            hi,
+            to_l,
+            to_u,
+            tol,
+        )
 
         @inbounds x_org[from_idx] = x_from
         @inbounds x_org[to_idx] = x_to
@@ -196,6 +189,7 @@ function ensure_postsolve_tape_gpu!(rec::PresolveRecord_gpu)
             end
             rec.tape_gpu = tape_gpu
         else
+            # Compatibility path for tests/diagnostics that still seed CPU tape directly.
             rec.tape_gpu = PostsolveTape_gpu(rec.tape)
         end
     end
@@ -306,12 +300,14 @@ end
 
 function _kernel_replay_x_tape_all!(
     x_org,
+    z_org,
     reduction_types,
     idx_starts,
     val_starts,
     tape_idx,
     tape_val,
     record_count,
+    tol,
 )
     tid = Int(threadIdx().x)
     lane_count = Int(blockDim().x)
@@ -363,26 +359,17 @@ function _kernel_replay_x_tape_all!(
                 to_u = @inbounds tape_val[val0 + 4]
 
                 y_val = @inbounds x_org[to_idx]
-
-                if isfinite(to_u)
-                    bound = (y_val - to_u) / ratio
-                    if ratio > 0.0
-                        lo = max(lo, bound)
-                    else
-                        hi = min(hi, bound)
-                    end
-                end
-                if isfinite(to_l)
-                    bound = (y_val - to_l) / ratio
-                    if ratio > 0.0
-                        hi = min(hi, bound)
-                    else
-                        lo = max(lo, bound)
-                    end
-                end
-
-                x_from = _choose_merged_source_value(lo, hi)
-                x_to = y_val - ratio * x_from
+                z_to = length(z_org) > 0 ? @inbounds(z_org[to_idx]) : 0.0
+                x_from, x_to = _recover_parallel_col_primal(
+                    y_val,
+                    z_to,
+                    ratio,
+                    lo,
+                    hi,
+                    to_l,
+                    to_u,
+                    tol,
+                )
 
                 @inbounds x_org[from_idx] = x_from
                 @inbounds x_org[to_idx] = x_to
@@ -508,6 +495,12 @@ function _kernel_replay_dual_tape_all_with_bound_changes!(
     A_rowPtr,
     A_colVal,
     A_nzVal,
+    AT_rowPtr,
+    AT_colVal,
+    AT_nzVal,
+    c,
+    l,
+    u,
     record_count,
     tol,
 )
@@ -516,6 +509,8 @@ function _kernel_replay_dual_tape_all_with_bound_changes!(
             reduction_type = @inbounds reduction_types[k]
             idx0 = Int(@inbounds idx_starts[k])
             val0 = Int(@inbounds val_starts[k])
+            idx1 = Int(@inbounds idx_starts[k + 1]) - 1
+            val1 = Int(@inbounds val_starts[k + 1]) - 1
 
             if reduction_type == Int32(SUB_COL)
                 elim_col = Int(@inbounds tape_idx[idx0])
@@ -559,6 +554,162 @@ function _kernel_replay_dual_tape_all_with_bound_changes!(
             elseif reduction_type == Int32(EQ_TO_INEQ)
                 row = Int(@inbounds tape_idx[idx0])
                 @inbounds y_org[row] += @inbounds tape_val[val0]
+            elseif reduction_type == Int32(PARALLEL_ROW)
+                if idx1 >= idx0 + 1 && val1 >= val0 + 4
+                    kept_row = Int(@inbounds tape_idx[idx0])
+                    deleted_row = Int(@inbounds tape_idx[idx0 + 1])
+                    ratio = @inbounds tape_val[val0]
+                    kept_old_AL = @inbounds tape_val[val0 + 1]
+                    kept_old_AU = @inbounds tape_val[val0 + 2]
+                    deleted_old_AL = @inbounds tape_val[val0 + 3]
+                    deleted_old_AU = @inbounds tape_val[val0 + 4]
+
+                    abs(ratio) <= tol && continue
+
+                    deleted_scaled_AL, deleted_scaled_AU = _parallel_row_scaled_interval(
+                        deleted_old_AL,
+                        deleted_old_AU,
+                        ratio,
+                    )
+                    if _parallel_row_interval_contains(
+                        deleted_scaled_AL,
+                        deleted_scaled_AU,
+                        kept_old_AL,
+                        kept_old_AU,
+                        tol,
+                    )
+                        @inbounds y_org[deleted_row] = 0.0
+                        continue
+                    end
+
+                    alpha_p = _parallel_row_activity(
+                        kept_row,
+                        A_rowPtr,
+                        A_colVal,
+                        A_nzVal,
+                        x_org,
+                    )
+                    alpha_d = _parallel_row_activity(
+                        deleted_row,
+                        A_rowPtr,
+                        A_colVal,
+                        A_nzVal,
+                        x_org,
+                    )
+
+                    kept_state = _parallel_row_dual_state(
+                        alpha_p,
+                        kept_old_AL,
+                        kept_old_AU,
+                        tol,
+                    )
+                    deleted_state = _parallel_row_dual_state(
+                        alpha_d,
+                        deleted_old_AL,
+                        deleted_old_AU,
+                        tol,
+                    )
+
+                    yd_lo, yd_hi = _parallel_row_state_interval(deleted_state)
+                    yp_lo, yp_hi = _parallel_row_deleted_dual_interval(
+                        @inbounds(y_org[kept_row]),
+                        ratio,
+                        kept_state,
+                    )
+
+                    sd_lo = max(yd_lo, yp_lo)
+                    sd_hi = min(yd_hi, yp_hi)
+                    sd_lo <= sd_hi + tol || continue
+
+                    yd_new = _clamp_with_inf(0.0, sd_lo, sd_hi)
+                    yp_new = @inbounds(y_org[kept_row]) - yd_new / ratio
+
+                    @inbounds y_org[kept_row] = yp_new
+                    @inbounds y_org[deleted_row] = yd_new
+                end
+            elseif reduction_type == Int32(DELETED_ROW)
+                if idx1 >= idx0 + 1 && val1 >= val0 + 2
+                    row = Int(@inbounds tape_idx[idx0])
+                    col = Int(@inbounds tape_idx[idx0 + 1])
+                    old_AL = @inbounds tape_val[val0]
+                    old_AU = @inbounds tape_val[val0 + 1]
+                    aij = @inbounds tape_val[val0 + 2]
+
+                    abs(aij) <= tol && continue
+
+                    gamma_j = @inbounds c[col]
+                    col_start = Int(@inbounds AT_rowPtr[col])
+                    col_stop = Int(@inbounds AT_rowPtr[col + 1]) - 1
+                    for p in col_start:col_stop
+                        prow = Int(@inbounds AT_colVal[p])
+                        prow == row && continue
+                        gamma_j -= @inbounds AT_nzVal[p] * @inbounds(y_org[prow])
+                    end
+
+                    xj = @inbounds x_org[col]
+                    zbar_j = @inbounds z_org[col]
+                    lj = @inbounds l[col]
+                    uj = @inbounds u[col]
+                    row_activity = aij * xj
+
+                    row_at_lower = isfinite(old_AL) && row_activity <= old_AL + tol
+                    row_at_upper = isfinite(old_AU) && row_activity >= old_AU - tol
+
+                    iz_lo = -Inf
+                    iz_hi = Inf
+                    if !(row_at_lower && row_at_upper)
+                        if row_at_lower
+                            if aij > 0.0
+                                iz_hi = gamma_j
+                            else
+                                iz_lo = gamma_j
+                            end
+                        elseif row_at_upper
+                            if aij > 0.0
+                                iz_lo = gamma_j
+                            else
+                                iz_hi = gamma_j
+                            end
+                        else
+                            iz_lo = gamma_j
+                            iz_hi = gamma_j
+                        end
+                    end
+
+                    at_lower = _postsolve_at_lower(xj, lj, tol)
+                    at_upper = _postsolve_at_upper(xj, uj, tol)
+
+                    z_lo = iz_lo
+                    z_hi = iz_hi
+                    exact_local_exists = true
+
+                    if !at_lower && !at_upper
+                        if (isfinite(iz_lo) && iz_lo > tol) || (isfinite(iz_hi) && iz_hi < -tol)
+                            z_lo = gamma_j
+                            z_hi = gamma_j
+                        else
+                            z_lo = 0.0
+                            z_hi = 0.0
+                        end
+                    elseif at_lower && !at_upper
+                        z_lo = max(z_lo, 0.0)
+                    elseif !at_lower && at_upper
+                        z_hi = min(z_hi, 0.0)
+                    end
+
+                    if exact_local_exists
+                        if isfinite(z_lo) && isfinite(z_hi) && z_lo > z_hi + tol
+                            exact_local_exists = false
+                        end
+                    end
+
+                    exact_local_exists || continue
+
+                    z_new = _clamp_with_inf(zbar_j, z_lo, z_hi)
+                    @inbounds z_org[col] = z_new
+                    @inbounds y_org[row] = (gamma_j - z_new) / aij
+                    @inbounds z_retrieved[col] = UInt8(1)
+                end
             elseif reduction_type == Int32(BOUND_CHANGE_THE_ROW)
                 col = Int(@inbounds tape_idx[idx0])
                 row = Int(@inbounds tape_idx[idx0 + 1])
@@ -623,6 +774,8 @@ end
 function postsolve_replay_x_tape_gpu!(
     x_org::CuVector{T},
     rec::PresolveRecord_gpu,
+    z_org::CuVector{<:AbstractFloat}=CuVector{Float64}(undef, 0);
+    tol::Float64=0.0,
 ) where {T}
     tape_gpu = ensure_postsolve_tape_gpu!(rec)
     record_count = postsolve_record_count(tape_gpu)
@@ -630,12 +783,14 @@ function postsolve_replay_x_tape_gpu!(
 
     @cuda threads=GPU_PRESOLVE_THREADS blocks=1 _kernel_replay_x_tape_all!(
         x_org,
+        z_org,
         tape_gpu.types,
         tape_gpu.index_starts,
         tape_gpu.value_starts,
         tape_gpu.indices,
         tape_gpu.vals,
         Int32(record_count),
+        tol,
     )
     return x_org
 end
@@ -678,6 +833,12 @@ function postsolve_replay_dual_tape_gpu!(
             original_model_gpu.A.rowPtr,
             original_model_gpu.A.colVal,
             original_model_gpu.A.nzVal,
+            original_model_gpu.AT.rowPtr,
+            original_model_gpu.AT.colVal,
+            original_model_gpu.AT.nzVal,
+            original_model_gpu.c,
+            original_model_gpu.l,
+            original_model_gpu.u,
             Int32(record_count),
             tol,
         )
@@ -990,9 +1151,9 @@ function postsolve_gpu(
     rec::PresolveRecord_gpu;
     presolve_params::Union{Nothing, PresolveParams}=nothing,
     original_model_gpu::Union{Nothing, LP_info_gpu}=nothing,
-    apply_original_dual_refinement::Bool=false,
 )
     _params = (presolve_params !== nothing) ? presolve_params : PresolveParams()
+    postsolve_tol = _params.postsolve_tol
     x_red_d = x_red isa CuVector ? x_red : CuVector(x_red)
     y_red_d = y_red isa CuVector ? y_red : CuVector(y_red)
     z_red_d = z_red isa CuVector ? z_red : CuVector(z_red)
@@ -1005,9 +1166,9 @@ function postsolve_gpu(
     @assert length(y_red_d) == Int(rec.m1)
     @assert length(z_red_d) == Int(rec.n1)
 
-    x_org = postsolve_restore_x_gpu(x_red_d, rec)
-    y_org = postsolve_restore_y_gpu(y_red_d, rec)
     z_org, z_retrieved = postsolve_restore_z_gpu_with_mask(z_red_d, rec)
+    x_org = postsolve_restore_x_gpu(x_red_d, rec, z_org; tol=postsolve_tol)
+    y_org = postsolve_restore_y_gpu(y_red_d, rec)
     postsolve_replay_dual_tape_gpu!(
         x_org,
         y_org,
@@ -1015,29 +1176,9 @@ function postsolve_gpu(
         z_retrieved,
         rec;
         original_model_gpu=original_model_gpu,
-        tol=1.0e-7,
+        tol=postsolve_tol,
     )
-    if !apply_original_dual_refinement && original_model_gpu !== nothing
-        _apply_original_dual_local_replay_gpu!(
-            x_org,
-            y_org,
-            z_org,
-            rec,
-            original_model_gpu;
-            tol=1.0e-7,
-        )
-    elseif apply_original_dual_refinement && original_model_gpu !== nothing
-        _apply_original_dual_refinement_guarded_gpu!(
-            x_org,
-            y_org,
-            z_org,
-            rec,
-            original_model_gpu;
-            tol=1.0e-7,
-            max_global_iters=10,
-        )
-    end
-
+    # Document-aligned behavior: keep postsolve strictly tape-based.
     return (x_org, y_org, z_org)
 end
 
@@ -1048,18 +1189,39 @@ function postsolve_restore_x_gpu(
     x_red::CuVector{T},
     rec::PresolveRecord_gpu,
 ) where {T}
+    return postsolve_restore_x_gpu(x_red, rec, CuVector{Float64}(undef, 0); tol=0.0)
+end
+
+function postsolve_restore_x_gpu(
+    x_red::CuVector{T},
+    rec::PresolveRecord_gpu,
+    z_org::CuVector{<:AbstractFloat};
+    tol::Float64=0.0,
+) where {T}
     x_org = CUDA.zeros(T, Int(rec.n0))
     scatter_by_red2org!(x_org, x_red, rec.col_red2org)
     postsolve_restore_fixed_x_gpu!(x_org, rec)
-    postsolve_replay_x_tape_gpu!(x_org, rec)
+    postsolve_replay_x_tape_gpu!(x_org, rec, z_org; tol=tol)
     return x_org
 end
 
 @inline function _choose_merged_source_value(lo::Float64, hi::Float64)
-    if isfinite(lo)
-        return lo
+    return _choose_merged_source_value(lo, hi, 0.0)
+end
+
+@inline function _choose_merged_source_value(lo::Float64, hi::Float64, tol::Float64)
+    if isfinite(lo) && isfinite(hi)
+        return 0.5 * (lo + hi)
+    elseif isfinite(lo)
+        if 0.0 > lo + tol
+            return 0.0
+        end
+        return lo + max(1.0, abs(lo) * max(tol, 1.0e-12))
     elseif isfinite(hi)
-        return hi
+        if 0.0 < hi - tol
+            return 0.0
+        end
+        return hi - max(1.0, abs(hi) * max(tol, 1.0e-12))
     end
     return 0.0
 end
@@ -1165,6 +1327,177 @@ end
         y = min(y, hi)
     end
     return y
+end
+
+@inline function _parallel_col_aggregate_lower_bound(
+    target_l::Float64,
+    source_l::Float64,
+    source_u::Float64,
+    ratio::Float64,
+)
+    if ratio > 0.0
+        if isfinite(target_l) && isfinite(source_l)
+            return target_l + ratio * source_l
+        end
+    else
+        if isfinite(target_l) && isfinite(source_u)
+            return target_l + ratio * source_u
+        end
+    end
+    return -Inf
+end
+
+@inline function _parallel_col_aggregate_upper_bound(
+    target_u::Float64,
+    source_l::Float64,
+    source_u::Float64,
+    ratio::Float64,
+)
+    if ratio > 0.0
+        if isfinite(target_u) && isfinite(source_u)
+            return target_u + ratio * source_u
+        end
+    else
+        if isfinite(target_u) && isfinite(source_l)
+            return target_u + ratio * source_l
+        end
+    end
+    return Inf
+end
+
+@inline function _recover_parallel_col_primal(
+    y_val::Float64,
+    z_to::Float64,
+    ratio::Float64,
+    source_l::Float64,
+    source_u::Float64,
+    target_l::Float64,
+    target_u::Float64,
+    tol::Float64,
+)
+    lo = source_l
+    hi = source_u
+
+    if isfinite(target_u)
+        bound = (y_val - target_u) / ratio
+        if ratio > 0.0
+            lo = max(lo, bound)
+        else
+            hi = min(hi, bound)
+        end
+    end
+    if isfinite(target_l)
+        bound = (y_val - target_l) / ratio
+        if ratio > 0.0
+            hi = min(hi, bound)
+        else
+            lo = max(lo, bound)
+        end
+    end
+
+    lower = _parallel_col_aggregate_lower_bound(target_l, source_l, source_u, ratio)
+    upper = _parallel_col_aggregate_upper_bound(target_u, source_l, source_u, ratio)
+
+    x_from = if z_to > tol && isfinite(lower) && abs(y_val - lower) <= tol
+        ratio > 0.0 ? source_l : source_u
+    elseif z_to < -tol && isfinite(upper) && abs(y_val - upper) <= tol
+        ratio > 0.0 ? source_u : source_l
+    else
+        _choose_merged_source_value(lo, hi, tol)
+    end
+    x_to = y_val - ratio * x_from
+    return x_from, x_to
+end
+
+@inline function _parallel_row_scaled_interval(
+    lower::Float64,
+    upper::Float64,
+    ratio::Float64,
+)
+    scaled_l = lower * ratio
+    scaled_u = upper * ratio
+    if ratio >= 0.0
+        return (scaled_l, scaled_u)
+    end
+    return (scaled_u, scaled_l)
+end
+
+@inline function _parallel_row_interval_contains(
+    outer_lo::Float64,
+    outer_hi::Float64,
+    inner_lo::Float64,
+    inner_hi::Float64,
+    tol::Float64,
+)
+    return outer_lo <= inner_lo + tol && inner_hi <= outer_hi + tol
+end
+
+@inline function _parallel_row_activity(
+    row::Int,
+    A_rowPtr,
+    A_colVal,
+    A_nzVal,
+    x_org,
+)
+    activity = 0.0
+    row_start = Int(@inbounds A_rowPtr[row])
+    row_stop = Int(@inbounds A_rowPtr[row + 1]) - 1
+    for p in row_start:row_stop
+        col = Int(@inbounds A_colVal[p])
+        activity += @inbounds(A_nzVal[p]) * @inbounds(x_org[col])
+    end
+    return activity
+end
+
+const _PARALLEL_ROW_STATE_ZERO = UInt8(0)
+const _PARALLEL_ROW_STATE_NONNEG = UInt8(1)
+const _PARALLEL_ROW_STATE_NONPOS = UInt8(2)
+const _PARALLEL_ROW_STATE_FREE = UInt8(3)
+
+@inline function _parallel_row_dual_state(
+    activity::Float64,
+    lower::Float64,
+    upper::Float64,
+    tol::Float64,
+)
+    at_lower = isfinite(lower) && activity <= lower + tol
+    at_upper = isfinite(upper) && activity >= upper - tol
+
+    if at_lower && at_upper
+        return _PARALLEL_ROW_STATE_FREE
+    elseif at_lower
+        return _PARALLEL_ROW_STATE_NONNEG
+    elseif at_upper
+        return _PARALLEL_ROW_STATE_NONPOS
+    end
+    return _PARALLEL_ROW_STATE_ZERO
+end
+
+@inline function _parallel_row_state_interval(state::UInt8)
+    if state == _PARALLEL_ROW_STATE_FREE
+        return (-Inf, Inf)
+    elseif state == _PARALLEL_ROW_STATE_NONNEG
+        return (0.0, Inf)
+    elseif state == _PARALLEL_ROW_STATE_NONPOS
+        return (-Inf, 0.0)
+    end
+    return (0.0, 0.0)
+end
+
+@inline function _parallel_row_deleted_dual_interval(
+    ybar_p::Float64,
+    ratio::Float64,
+    kept_state::UInt8,
+)
+    pivot = ratio * ybar_p
+    if kept_state == _PARALLEL_ROW_STATE_FREE
+        return (-Inf, Inf)
+    elseif kept_state == _PARALLEL_ROW_STATE_ZERO
+        return (pivot, pivot)
+    elseif kept_state == _PARALLEL_ROW_STATE_NONNEG
+        return ratio > 0.0 ? (-Inf, pivot) : (pivot, Inf)
+    end
+    return ratio > 0.0 ? (pivot, Inf) : (-Inf, pivot)
 end
 
 @inline function _column_bound_sign_violation(

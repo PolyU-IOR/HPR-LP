@@ -10,12 +10,19 @@ Base.@kwdef mutable struct PresolveParams
     max_iters::Int = 10
     verbose::Bool = false
     debug_checks::Bool = false
+    trace_enabled::Bool = false
+    trace_path::Union{Nothing,String} = nothing
     record_postsolve_tape::Bool = true
     record_postsolve_tape_cpu::Bool = false
 
     feasibility_tol::Float64 = 1e-9
     bound_tol::Float64 = 1e-9
     zero_tol::Float64 = 1e-12
+    primal_propagation_relax_eta::Float64 = 0.5
+    primal_propagation_relax_scale::Float64 = 0.01
+    primal_propagation_relax_cap::Float64 = 1.0e-2
+    primal_propagation_min_tighten_abs::Float64 = 1.0e-2
+    primal_propagation_min_tighten_rel::Float64 = 1.0e-2
     doubleton_eq_max_shift::Int = 10
     doubleton_eq_single_batch_per_iter::Bool = false
 
@@ -28,6 +35,8 @@ Base.@kwdef mutable struct PresolveParams
     enable_parallel_rows::Bool = true
     enable_empty_cols::Bool = true
     enable_singleton_cols::Bool = true
+    enable_singleton_cols_eq::Bool = false
+    enable_singleton_cols_dual_infer::Bool = false
     enable_doubleton_eq::Bool = false
     enable_dual_fix::Bool = true
     enable_parallel_cols::Bool = true
@@ -41,8 +50,10 @@ Base.@kwdef mutable struct PresolveParams
     enable_remove_empty_rows::Bool = true
     enable_remove_empty_cols::Bool = true
 
-    # Postsolve: optionally apply guarded original-model dual refinement after replay
+    # Backward-compatible legacy postsolve flag; simplified replay ignores it.
     apply_postsolve_original_dual_refinement::Bool = false
+
+    postsolve_tol::Float64 = 1.0e-7
 end
 
 mutable struct PresolveStats_gpu

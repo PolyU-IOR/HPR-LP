@@ -145,6 +145,13 @@ end
 function _kernel_parallel_row_groups!(
     status_flag,
     row_delete,
+    merge_to,
+    merge_ratio,
+    kept_old_AL,
+    kept_old_AU,
+    deleted_old_AL,
+    deleted_old_AU,
+    merge_step,
     sorted_hash,
     sorted_rows,
     keep_row,
@@ -195,6 +202,7 @@ function _kernel_parallel_row_groups!(
         rep == Int32(0) && return
 
         found_parallel_peer = false
+        step = Int32(0)
         for a in s:e
             @inbounds row = sorted_rows[a]
             if row == rep || keep_row[row] == UInt8(0)
@@ -210,6 +218,15 @@ function _kernel_parallel_row_groups!(
                 CUDA.@atomic status_flag[1] = max(status_flag[1], Int32(1))
                 return
             end
+
+            step += Int32(1)
+            @inbounds merge_to[row] = rep
+            @inbounds merge_ratio[row] = ratio
+            @inbounds kept_old_AL[row] = rep_l
+            @inbounds kept_old_AU[row] = rep_u
+            @inbounds deleted_old_AL[row] = AL[row]
+            @inbounds deleted_old_AU[row] = AU[row]
+            @inbounds merge_step[row] = step
 
             rep_l = max(rep_l, row_l)
             rep_u = min(rep_u, row_u)
@@ -257,9 +274,23 @@ function apply_rule_parallel_rows!(
 
     status_flag = CUDA.zeros(Int32, 1)
     row_delete = CUDA.zeros(UInt8, m)
+    merge_to = CUDA.zeros(Int32, m)
+    merge_ratio = CUDA.zeros(Float64, m)
+    kept_old_AL = CUDA.zeros(Float64, m)
+    kept_old_AU = CUDA.zeros(Float64, m)
+    deleted_old_AL = CUDA.zeros(Float64, m)
+    deleted_old_AU = CUDA.zeros(Float64, m)
+    merge_step = CUDA.zeros(Int32, m)
     @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks _kernel_parallel_row_groups!(
         status_flag,
         row_delete,
+        merge_to,
+        merge_ratio,
+        kept_old_AL,
+        kept_old_AU,
+        deleted_old_AL,
+        deleted_old_AU,
+        merge_step,
         sorted_hash,
         sorted_rows,
         plan.keep_row_mask,
@@ -284,6 +315,40 @@ function apply_rule_parallel_rows!(
 
     removed_any = Int(sum(Int32.(row_delete .!= UInt8(0)))) > 0
     tightened_any = false
+    if removed_any && pparams.record_postsolve_tape
+        _, removed_rows, removed_count = build_maps_from_mask(row_delete)
+        if Int(removed_count) > 0
+            kept_rows_sel = gather_by_red2org(merge_to, removed_rows)
+            merge_ratio_sel = gather_by_red2org(merge_ratio, removed_rows)
+            kept_old_AL_sel = gather_by_red2org(kept_old_AL, removed_rows)
+            kept_old_AU_sel = gather_by_red2org(kept_old_AU, removed_rows)
+            deleted_old_AL_sel = gather_by_red2org(deleted_old_AL, removed_rows)
+            deleted_old_AU_sel = gather_by_red2org(deleted_old_AU, removed_rows)
+            merge_step_sel = gather_by_red2org(merge_step, removed_rows)
+
+            removed_rows_h = _copy_vector_to_host(removed_rows)
+            kept_rows_h = _copy_vector_to_host(kept_rows_sel)
+            merge_ratio_h = _copy_vector_to_host(merge_ratio_sel)
+            kept_old_AL_h = _copy_vector_to_host(kept_old_AL_sel)
+            kept_old_AU_h = _copy_vector_to_host(kept_old_AU_sel)
+            deleted_old_AL_h = _copy_vector_to_host(deleted_old_AL_sel)
+            deleted_old_AU_h = _copy_vector_to_host(deleted_old_AU_sel)
+            merge_step_h = _copy_vector_to_host(merge_step_sel)
+
+            perm = sortperm(eachindex(merge_step_h); by=t -> merge_step_h[t])
+            append_parallel_row_records_gpu!(
+                plan.tape_gpu,
+                CuVector(Int32[kept_rows_h[t] for t in perm]),
+                CuVector(Int32[removed_rows_h[t] for t in perm]),
+                CuVector(Float64[merge_ratio_h[t] for t in perm]),
+                CuVector(Float64[kept_old_AL_h[t] for t in perm]),
+                CuVector(Float64[kept_old_AU_h[t] for t in perm]),
+                CuVector(Float64[deleted_old_AL_h[t] for t in perm]),
+                CuVector(Float64[deleted_old_AU_h[t] for t in perm]);
+                dual_mode=POSTSOLVE_DUAL_EXACT,
+            )
+        end
+    end
     if removed_any
         copyto!(plan.keep_row_mask, UInt8.((plan.keep_row_mask .!= UInt8(0)) .& .!(row_delete .!= UInt8(0))))
         tightened_any = true

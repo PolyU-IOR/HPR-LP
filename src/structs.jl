@@ -30,12 +30,13 @@ Parameters for the HPR-LP solver.
 - `warm_up::Bool`: Enable warm-up phase (default: true)
 - `print_frequency::Int`: Print log every N iterations, -1 for auto (default: -1)
 - `verbose::Bool`: Enable verbose output (default: true)
-- `autotune_verbose::Bool`: Enable deterministic GPU autotune logging (default: false)
+- `autotune_verbose::Bool`: Enable customized GPU spmv autotune logging (default: false)
 - `initial_x::Union{Vector{Float64},Nothing}`: Initial primal solution (default: nothing)
 - `initial_y::Union{Vector{Float64},Nothing}`: Initial dual solution (default: nothing)
 - `auto_save::Bool`: Automatically save best x, y, and sigma during optimization (default: false)
 - `save_filename::String`: Filename for auto-save HDF5 file (default: "hprlp_autosave.h5")
 - `use_presolve::Bool`: Enable the GPU presolve backend before the main HPR-LP solve (default: true)
+- `use_postsolve::Bool`: Enable postsolve replay after reduced-model presolve (default: false)
 
 # Example
 ```julia
@@ -90,7 +91,7 @@ mutable struct HPRLP_parameters
     # whether to print verbose output, default is true
     verbose::Bool
 
-    # whether to print deterministic autotune output, default is false
+    # whether to print customized GPU spmv autotune logging, default is false
     autotune_verbose::Bool
 
     # initial primal solution, default is nothing
@@ -108,8 +109,11 @@ mutable struct HPRLP_parameters
     # whether to use the GPU presolve backend or not, default is false
     use_presolve::Bool
 
+    # whether to replay postsolve after reduced-model presolve
+    use_postsolve::Bool
+
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", true)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", true, false)
 end
 
 """
@@ -189,13 +193,33 @@ mutable struct HPRLP_results
     status::String
 
     # The vector x
-    x::Vector{Float64}
+    x::AbstractVector{Float64}
 
     # The vector y
-    y::Vector{Float64}
+    y::AbstractVector{Float64}
 
     # The vector z
-    z::Vector{Float64}
+    z::AbstractVector{Float64}
+
+    # Presolve / postsolve time summary
+    presolve_time::Float64
+    postsolve_time::Float64
+
+    # Presolve dimension summary
+    presolve_m0::Int
+    presolve_n0::Int
+    presolve_m1::Int
+    presolve_n1::Int
+
+    # Reduced-model metrics
+    reduced_p_feas::Float64
+    reduced_d_feas::Float64
+    reduced_gap::Float64
+
+    # Original-model metrics after postsolve
+    original_p_feas::Float64
+    original_d_feas::Float64
+    original_gap::Float64
 
     # Default constructor
     HPRLP_results() = new()

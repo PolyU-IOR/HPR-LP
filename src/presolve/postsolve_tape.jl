@@ -7,6 +7,7 @@ Typed postsolve metadata for replaying presolve transformations.
     FIXED_COL_INF
     SUB_COL
     PARALLEL_COL
+    PARALLEL_ROW
     DELETED_ROW
     ADDED_ROW
     ADDED_ROWS
@@ -1041,6 +1042,136 @@ function append_parallel_col_records_gpu!(
     return tape
 end
 
+function append_parallel_row_record!(
+    tape::PostsolveTape,
+    kept_row::Integer,
+    deleted_row::Integer,
+    ratio::Real,
+    kept_old_AL::Real,
+    kept_old_AU::Real,
+    deleted_old_AL::Real,
+    deleted_old_AU::Real;
+    dual_mode::PostsolveDualMode=POSTSOLVE_DUAL_MINIMAL,
+)
+    return append_postsolve_record!(
+        tape,
+        PARALLEL_ROW;
+        indices=Int32[kept_row, deleted_row],
+        vals=Float64[ratio, kept_old_AL, kept_old_AU, deleted_old_AL, deleted_old_AU],
+        dual_mode=dual_mode,
+    )
+end
+
+function _kernel_pack_parallel_row_records!(
+    indices,
+    vals,
+    kept_rows,
+    deleted_rows,
+    ratios,
+    kept_old_AL,
+    kept_old_AU,
+    deleted_old_AL,
+    deleted_old_AU,
+    k,
+)
+    t = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if t <= k
+        idx0 = 2 * (t - 1) + 1
+        val0 = 5 * (t - 1) + 1
+        @inbounds indices[idx0] = kept_rows[t]
+        @inbounds indices[idx0 + 1] = deleted_rows[t]
+        @inbounds vals[val0] = ratios[t]
+        @inbounds vals[val0 + 1] = kept_old_AL[t]
+        @inbounds vals[val0 + 2] = kept_old_AU[t]
+        @inbounds vals[val0 + 3] = deleted_old_AL[t]
+        @inbounds vals[val0 + 4] = deleted_old_AU[t]
+    end
+    return
+end
+
+function append_parallel_row_records_gpu!(
+    tape::PostsolveTape_gpu,
+    kept_rows::CuVector{Int32},
+    deleted_rows::CuVector{Int32},
+    ratios::CuVector{Float64},
+    kept_old_AL::CuVector{Float64},
+    kept_old_AU::CuVector{Float64},
+    deleted_old_AL::CuVector{Float64},
+    deleted_old_AU::CuVector{Float64};
+    dual_mode::PostsolveDualMode=POSTSOLVE_DUAL_MINIMAL,
+)
+    k = length(kept_rows)
+    k == 0 && return tape
+
+    types = CUDA.fill(Int32(PARALLEL_ROW), k)
+    index_starts = _build_constant_record_starts_gpu(k, Int32(2))
+    value_starts = _build_constant_record_starts_gpu(k, Int32(5))
+    dual_modes = CUDA.fill(UInt8(dual_mode), k)
+    indices = CuVector{Int32}(undef, 2 * k)
+    vals = CuVector{Float64}(undef, 5 * k)
+
+    blocks = cld(k, GPU_PRESOLVE_THREADS)
+    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks _kernel_pack_parallel_row_records!(
+        indices,
+        vals,
+        kept_rows,
+        deleted_rows,
+        ratios,
+        kept_old_AL,
+        kept_old_AU,
+        deleted_old_AL,
+        deleted_old_AU,
+        Int32(k),
+    )
+
+    append_postsolve_tape!(
+        tape,
+        PostsolveTape_gpu(types, index_starts, value_starts, dual_modes, indices, vals),
+    )
+    return tape
+end
+
+function append_parallel_row_records!(
+    tape::PostsolveTape,
+    kept_rows::AbstractVector{<:Integer},
+    deleted_rows::AbstractVector{<:Integer},
+    ratios::AbstractVector{<:Real},
+    kept_old_AL::AbstractVector{<:Real},
+    kept_old_AU::AbstractVector{<:Real},
+    deleted_old_AL::AbstractVector{<:Real},
+    deleted_old_AU::AbstractVector{<:Real};
+    dual_mode::PostsolveDualMode=POSTSOLVE_DUAL_MINIMAL,
+)
+    count = length(kept_rows)
+    count == length(deleted_rows) == length(ratios) == length(kept_old_AL) ==
+        length(kept_old_AU) == length(deleted_old_AL) == length(deleted_old_AU) ||
+        error("PARALLEL_ROW payload mismatch.")
+
+    kept_rows_h = _copy_vector_to_host(kept_rows)
+    deleted_rows_h = _copy_vector_to_host(deleted_rows)
+    ratios_h = _copy_vector_to_host(ratios)
+    kept_old_AL_h = _copy_vector_to_host(kept_old_AL)
+    kept_old_AU_h = _copy_vector_to_host(kept_old_AU)
+    deleted_old_AL_h = _copy_vector_to_host(deleted_old_AL)
+    deleted_old_AU_h = _copy_vector_to_host(deleted_old_AU)
+
+    for t in eachindex(kept_rows_h)
+        append_parallel_row_record!(
+            tape,
+            kept_rows_h[t],
+            deleted_rows_h[t],
+            ratios_h[t],
+            kept_old_AL_h[t],
+            kept_old_AU_h[t],
+            deleted_old_AL_h[t],
+            deleted_old_AU_h[t];
+            dual_mode=dual_mode,
+        )
+    end
+
+    return tape
+end
+
 function append_sub_col_records_from_payload!(
     tape::PostsolveTape,
     eliminated_cols::AbstractVector{<:Integer},
@@ -1254,6 +1385,11 @@ function globalize_postsolve_tape(
             for t in 2:length(idx)
                 idx[t] = row_map[idx[t]]
             end
+        elseif reduction_type == PARALLEL_ROW
+            idx[1] = row_map[idx[1]]
+            if length(idx) >= 2
+                idx[2] = row_map[idx[2]]
+            end
         elseif reduction_type == BOUND_CHANGE_NO_ROW ||
                reduction_type == FIXED_COL_INF ||
                reduction_type == PARALLEL_COL
@@ -1312,6 +1448,11 @@ function _kernel_globalize_postsolve_tape_indices!(
             @inbounds mapped_idx[idx0] = col_map[mapped_idx[idx0]]
             for pos in (idx0 + 1):idx1
                 @inbounds mapped_idx[pos] = row_map[mapped_idx[pos]]
+            end
+        elseif reduction_type == Int32(PARALLEL_ROW)
+            @inbounds mapped_idx[idx0] = row_map[mapped_idx[idx0]]
+            if idx1 >= idx0 + 1
+                @inbounds mapped_idx[idx0 + 1] = row_map[mapped_idx[idx0 + 1]]
             end
         elseif reduction_type == Int32(BOUND_CHANGE_NO_ROW) ||
                reduction_type == Int32(FIXED_COL_INF) ||

@@ -115,10 +115,6 @@ function run_postsolve(
         error("Presolve state has been freed or is invalid.")
     end
 
-    apply_original_dual_refinement =
-        !isnothing(presolve_params) &&
-        getfield(presolve_params, :apply_postsolve_original_dual_refinement)
-
     x_org, y_org, z_org = postsolve_gpu(
         x_red,
         y_red,
@@ -126,7 +122,6 @@ function run_postsolve(
         state.record;
         presolve_params=presolve_params,
         original_model_gpu=state.original_model_gpu,
-        apply_original_dual_refinement=apply_original_dual_refinement,
     )
 
     return Array(x_org), Array(y_org), Array(z_org)

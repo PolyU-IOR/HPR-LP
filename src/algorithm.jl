@@ -275,6 +275,7 @@ function postsolve_and_validate_original_kkt!(
         println("="^80)
     end
 
+    postsolve_start = time()
     try
         x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
         y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
@@ -290,12 +291,16 @@ function postsolve_and_validate_original_kkt!(
         results.y = y_org
         results.z = z_org
     finally
+        results.postsolve_time = time() - postsolve_start
         GPUPresolve.free_presolve_state!(presolve_state)
     end
 
     if results.status == "OPTIMAL"
         p_obj, d_obj, p_feas, d_feas, gap =
             compute_original_kkt_metrics(original_model, results.x, results.y, results.z)
+        results.original_p_feas = p_feas
+        results.original_d_feas = d_feas
+        results.original_gap = gap
         original_kkt_error = max(p_feas, d_feas, gap)
         original_kkt_passed = original_kkt_error <= params.stoptol
 
@@ -661,9 +666,9 @@ function collect_results_gpu!(
     tolerance_iters::Vector{Int}
 )
     results = HPRLP_results()
-    results.x = CuVector{Float64}(undef, ws.n)
-    results.y = CuVector{Float64}(undef, ws.m)
-    results.z = CuVector{Float64}(undef, ws.n)
+    results.x = Vector{Float64}(undef, ws.n)
+    results.y = Vector{Float64}(undef, ws.m)
+    results.z = Vector{Float64}(undef, ws.n)
     results.iter = iter
     results.time = time() - t_start_alg
     results.power_time = power_time
@@ -671,9 +676,9 @@ function collect_results_gpu!(
     results.primal_obj = residuals.primal_obj_bar
     results.gap = residuals.rel_gap_bar
     ### copy the results to the CPU ### 
-    results.x .= Vector(sc.b_scale * (ws.x_bar ./ sc.col_norm))
-    results.y .= Vector(sc.c_scale * (ws.y_bar ./ sc.row_norm))
-    results.z .= Vector(sc.c_scale * (ws.z_bar .* sc.col_norm))
+    results.x .= sc.b_scale * Vector(ws.x_bar ./ sc.col_norm)
+    results.y .= sc.c_scale * Vector(ws.y_bar ./ sc.row_norm)
+    results.z .= sc.c_scale * Vector(ws.z_bar .* sc.col_norm)
 
     results.status = status
     # Set tolerance results, using final values if threshold not reached
@@ -683,6 +688,18 @@ function collect_results_gpu!(
     results.iter_6 = tolerance_iters[2] == 0 ? iter : tolerance_iters[2]
     results.time_8 = tolerance_times[3] == 0.0 ? results.time : tolerance_times[3]
     results.iter_8 = tolerance_iters[3] == 0 ? iter : tolerance_iters[3]
+    results.presolve_time = 0.0
+    results.postsolve_time = 0.0
+    results.presolve_m0 = ws.m
+    results.presolve_n0 = ws.n
+    results.presolve_m1 = ws.m
+    results.presolve_n1 = ws.n
+    results.reduced_p_feas = residuals.err_Rp_org_bar
+    results.reduced_d_feas = residuals.err_Rd_org_bar
+    results.reduced_gap = residuals.rel_gap_bar
+    results.original_p_feas = NaN
+    results.original_d_feas = NaN
+    results.original_gap = NaN
     return results
 end
 
@@ -719,6 +736,18 @@ function collect_results_cpu!(
     results.iter_6 = tolerance_iters[2] == 0 ? iter : tolerance_iters[2]
     results.time_8 = tolerance_times[3] == 0.0 ? results.time : tolerance_times[3]
     results.iter_8 = tolerance_iters[3] == 0 ? iter : tolerance_iters[3]
+    results.presolve_time = 0.0
+    results.postsolve_time = 0.0
+    results.presolve_m0 = ws.m
+    results.presolve_n0 = ws.n
+    results.presolve_m1 = ws.m
+    results.presolve_n1 = ws.n
+    results.reduced_p_feas = residuals.err_Rp_org_bar
+    results.reduced_d_feas = residuals.err_Rd_org_bar
+    results.reduced_gap = residuals.rel_gap_bar
+    results.original_p_feas = NaN
+    results.original_d_feas = NaN
+    results.original_gap = NaN
     return results
 end
 
@@ -1609,15 +1638,18 @@ See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`HPRLP_parameters
 """
 function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
     presolve_state = nothing
+    original_model = model
+    presolve_elapsed = 0.0
 
     # Presolve if requested
     if params.use_presolve
-        original_model = model
+        presolve_start = time()
         model, presolve_state = apply_gpu_presolve(
             original_model,
             params;
             presolve_params=presolve_params,
         )
+        presolve_elapsed = time() - presolve_start
     end
 
     # Handle warmup if requested
@@ -1677,6 +1709,9 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
     end
 
     if presolve_state !== nothing
+        results.presolve_time = presolve_elapsed
+        results.presolve_m0, results.presolve_n0 = size(original_model.A)
+        results.presolve_m1, results.presolve_n1 = size(model.A)
         postsolve_and_validate_original_kkt!(
             results,
             original_model,

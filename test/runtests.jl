@@ -94,7 +94,7 @@ end
         u = [2.0]
 
         model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
-        p_obj, d_obj, p_feas, d_feas, gap =
+        p_obj, d_obj, p_feas, d_feas, gap, delta_y, delta_z =
             HPRLP.compute_original_kkt_metrics(model, [1.0], [1.0], [0.0])
 
         @test isapprox(p_obj, 1.0, atol=1e-10)
@@ -102,6 +102,8 @@ end
         @test isapprox(p_feas, 0.0, atol=1e-10)
         @test isapprox(d_feas, 0.0, atol=1e-10)
         @test isapprox(gap, 0.0, atol=1e-10)
+        @test isapprox(delta_y, 1.0, atol=1e-10)
+        @test isapprox(delta_z, 0.0, atol=1e-10)
     end
 
     @testset "Original KKT Projection With Infinite Bounds" begin
@@ -113,7 +115,7 @@ end
         u = [Inf]
 
         model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
-        p_obj, d_obj, p_feas, d_feas, gap =
+        p_obj, d_obj, p_feas, d_feas, gap, delta_y, delta_z =
             HPRLP.compute_original_kkt_metrics(model, [0.5], [2.0], [-3.0])
 
         @test isapprox(p_obj, 0.0, atol=1e-10)
@@ -121,6 +123,8 @@ end
         @test isapprox(p_feas, 0.0, atol=1e-10)
         @test isapprox(d_feas, 0.0, atol=1e-10)
         @test isapprox(gap, 0.0, atol=1e-10)
+        @test isapprox(delta_y, 0.0, atol=1e-10)
+        @test isapprox(delta_z, 0.0, atol=1e-10)
     end
 
     @testset "Original KKT Error" begin
