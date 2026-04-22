@@ -2,6 +2,7 @@ module HPRLP
 
 using SparseArrays
 using LinearAlgebra
+using MPSReader
 using QPSReader
 using CUDA
 using CUDA.CUSPARSE
@@ -27,6 +28,6 @@ export Optimizer
 
 # Export main functions and types for direct API usage
 export HPRLP_parameters, HPRLP_results
-export build_from_Abc, optimize
+export build_from_Abc, build_from_mps, optimize
 
 end

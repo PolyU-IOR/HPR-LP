@@ -1,0 +1,18 @@
+name = "MPSReader"
+uuid = "8a64bf6f-2ba6-4a83-9e58-54aa4c2c8bb1"
+authors = ["Kaihuang Chen <kaihuang.chen@connect.polyu.hk>"]
+version = "0.1.0"
+
+[deps]
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+
+[compat]
+CodecZlib = "0.7"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

@@ -494,3 +494,22 @@ function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     return standard_lp
 end
 
+"""
+    build_from_mps(filename::AbstractString; mpsformat::Symbol = :auto)
+
+Read an `.mps` or `.mps.gz` file with `MPSReader` and convert it into an `LP_info_cpu`
+model for HPR-LP.
+
+# Arguments
+- `filename::AbstractString`: Path to the MPS file.
+- `mpsformat::Symbol`: `:auto`, `:fixed`, or `:free`.
+
+# Returns
+- `LP_info_cpu`: LP model ready for `optimize` or `solve`.
+"""
+function build_from_mps(filename::AbstractString; mpsformat::Symbol = :auto)
+    data = MPSReader.read_mps(filename; keep_names = false, mpsformat = mpsformat)
+    A = sparse(data.arows, data.acols, data.avals, data.nrow, data.ncol)
+    return build_from_Abc(A, data.c, data.lcon, data.ucon, data.lvar, data.uvar, data.obj_constant)
+end
+

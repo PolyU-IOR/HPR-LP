@@ -129,12 +129,14 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP.HPRLP
 				println(@sprintf("solving the problem %d", index), @sprintf(": %s", file))
 				println("Solving: ----------------------------------------------------------------------------------------------------------")
 
-				model = read_from_file(file_name)
-				set_optimizer(model, HPRLP.Optimizer)
-				set_hprlp_attributes!(model, params)
-				optimize!(model)
+				# model = read_from_file(file_name)
+                model = HPRLP.build_from_mps(file_name)
+                solver_result = HPRLP.optimize(model, params)
+				# set_optimizer(model, HPRLP.Optimizer)
+				# set_hprlp_attributes!(model, params)
+				# optimize!(model)
 
-				solver_result = unsafe_backend(model).results
+				# solver_result = unsafe_backend(model).results
 
 				println("Solve complete ----------------------------------------------------------------------------------------------------------")
 				println(
