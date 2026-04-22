@@ -35,7 +35,7 @@ Parameters for the HPR-LP solver.
 - `initial_y::Union{Vector{Float64},Nothing}`: Initial dual solution (default: nothing)
 - `auto_save::Bool`: Automatically save best x, y, and sigma during optimization (default: false)
 - `save_filename::String`: Filename for auto-save HDF5 file (default: "hprlp_autosave.h5")
-- `use_presolve::Bool`: Enable the GPU presolve backend before the main HPR-LP solve (default: true)
+- `presolve::String`: Presolve backend selector (`"GPU"`, `"PSLP"`, `"NONE"`) (default: `"GPU"`)
 - `use_postsolve::Bool`: Enable postsolve replay after reduced-model presolve (default: false)
 
 # Example
@@ -106,14 +106,14 @@ mutable struct HPRLP_parameters
     # filename for auto-save HDF5 file, default is "hprlp_autosave.h5"
     save_filename::String
 
-    # whether to use the GPU presolve backend or not, default is false
-    use_presolve::Bool
+    # presolve backend selector ("GPU", "PSLP", "NONE"), default is "GPU"
+    presolve::String
 
     # whether to replay postsolve after reduced-model presolve
     use_postsolve::Bool
 
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", true, false)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false)
 end
 
 """
@@ -206,10 +206,10 @@ mutable struct HPRLP_results
     postsolve_time::Float64
 
     # Presolve dimension summary
-    presolve_m0::Int
-    presolve_n0::Int
-    presolve_m1::Int
-    presolve_n1::Int
+    original_nRows::Int
+    original_nCols::Int
+    presolved_nRows::Int
+    presolved_nCols::Int
 
     # Reduced-model metrics
     reduced_p_feas::Float64

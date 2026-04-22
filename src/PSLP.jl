@@ -9,9 +9,14 @@ const LIB_NAME = "libPSLP.$(Libdl.dlext)"
 const LIB_PATH = joinpath(DEPS_DIR, LIB_NAME)
 
 function __init__()
-    if !isfile(LIB_PATH)
-        error("PSLP dynamic library not found at $LIB_PATH.\n" * "Please check your build steps.")
-    end
+    return nothing
+end
+
+is_available() = isfile(LIB_PATH)
+
+function _ensure_available()
+    is_available() || error("PSLP dynamic library not found at $LIB_PATH.\n" * "Please check your build steps.")
+    return nothing
 end
 
 # ================= C Struct Definitions =================
@@ -74,6 +79,7 @@ function free_presolver_wrapper(model::PresolverModel)
 end
 
 function _default_settings_ptr()
+    _ensure_available()
     return ccall((:default_settings, LIB_PATH), Ptr{Settings}, ())
 end
 

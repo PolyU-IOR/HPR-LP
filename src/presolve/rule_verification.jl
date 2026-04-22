@@ -595,7 +595,7 @@ function diagnose_singleton_cols(
     params.device_number = device_number
     params.warm_up = false
     params.verbose = verbose
-    params.use_presolve = false
+    params.presolve = "NONE"
     params.use_resolve = false
     params.use_postsolve = false
 
@@ -647,7 +647,7 @@ function validate_isolated_rule_postsolve(
         params.device_number = device_number
         params.warm_up = false
         params.verbose = verbose
-        params.use_presolve = true
+        params.presolve = "GPU"
         params.use_resolve = false
         params.use_postsolve = true
         params.time_limit = time_limit
@@ -737,7 +737,7 @@ function diagnose_isolated_bound_change_postsolve(
     params.device_number = device_number
     params.warm_up = false
     params.verbose = verbose
-    params.use_presolve = true
+    params.presolve = "GPU"
     params.use_resolve = false
     params.use_postsolve = true
     params.time_limit = time_limit

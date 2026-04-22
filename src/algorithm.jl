@@ -270,8 +270,15 @@ function postsolve_and_validate_original_kkt!(
     presolve_params=nothing,
 )
     if params.verbose
+        postsolve_label = if presolve_state isa GPUPresolve.PresolveState
+            "GPU POSTSOLVE"
+        elseif presolve_state isa PSLP.PresolverModel
+            "PSLP POSTSOLVE"
+        else
+            "POSTSOLVE"
+        end
         println("\n", "="^80)
-        println("GPU POSTSOLVE")
+        println(postsolve_label)
         println("="^80)
     end
 
@@ -280,22 +287,36 @@ function postsolve_and_validate_original_kkt!(
         x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
         y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
         z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
-        x_org, y_org, z_org = GPUPresolve.run_postsolve(
-            presolve_state,
-            x_red,
-            y_red,
-            z_red;
-            presolve_params=presolve_params,
-        )
+        x_org, y_org, z_org = if presolve_state isa GPUPresolve.PresolveState
+            GPUPresolve.run_postsolve(
+                presolve_state,
+                x_red,
+                y_red,
+                z_red;
+                presolve_params=presolve_params,
+            )
+        elseif presolve_state isa PSLP.PresolverModel
+            PSLP.postsolve(presolve_state, x_red, y_red, z_red)
+        else
+            error("Unsupported presolve state type: $(typeof(presolve_state))")
+        end
         results.x = x_org
         results.y = y_org
         results.z = z_org
     finally
         results.postsolve_time = time() - postsolve_start
-        GPUPresolve.free_presolve_state!(presolve_state)
+        if params.verbose
+            println("Postsolve time: ", @sprintf("%.2f", results.postsolve_time), " seconds")
+        end
+        if presolve_state isa GPUPresolve.PresolveState
+            GPUPresolve.free_presolve_state!(presolve_state)
+        elseif presolve_state isa PSLP.PresolverModel
+            PSLP.free_presolver_wrapper(presolve_state)
+        end
     end
 
     if results.status == "OPTIMAL"
+        t_check_start = time()
         p_obj, d_obj, p_feas, d_feas, gap =
             compute_original_kkt_metrics(original_model, results.x, results.y, results.z)
         results.original_p_feas = p_feas
@@ -318,6 +339,9 @@ function postsolve_and_validate_original_kkt!(
             end
         elseif params.verbose
             println("Postsolve original KKT check passed")
+        end
+        if params.verbose
+            println("Original KKT check time: ", @sprintf("%.2f", time() - t_check_start), " seconds")
         end
     else
         if params.verbose
@@ -690,10 +714,10 @@ function collect_results_gpu!(
     results.iter_8 = tolerance_iters[3] == 0 ? iter : tolerance_iters[3]
     results.presolve_time = 0.0
     results.postsolve_time = 0.0
-    results.presolve_m0 = ws.m
-    results.presolve_n0 = ws.n
-    results.presolve_m1 = ws.m
-    results.presolve_n1 = ws.n
+    results.original_nRows = ws.m
+    results.original_nCols = ws.n
+    results.presolved_nRows = ws.m
+    results.presolved_nCols = ws.n
     results.reduced_p_feas = residuals.err_Rp_org_bar
     results.reduced_d_feas = residuals.err_Rd_org_bar
     results.reduced_gap = residuals.rel_gap_bar
@@ -738,10 +762,10 @@ function collect_results_cpu!(
     results.iter_8 = tolerance_iters[3] == 0 ? iter : tolerance_iters[3]
     results.presolve_time = 0.0
     results.postsolve_time = 0.0
-    results.presolve_m0 = ws.m
-    results.presolve_n0 = ws.n
-    results.presolve_m1 = ws.m
-    results.presolve_n1 = ws.n
+    results.original_nRows = ws.m
+    results.original_nCols = ws.n
+    results.presolved_nRows = ws.m
+    results.presolved_nCols = ws.n
     results.reduced_p_feas = residuals.err_Rp_org_bar
     results.reduced_d_feas = residuals.err_Rd_org_bar
     results.reduced_gap = residuals.rel_gap_bar
@@ -1245,6 +1269,7 @@ end
 # Helper function to print solver parameters
 function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu,LP_info_gpu})
     m, n = size(lp.A)
+    presolve_backend = normalize_presolve_backend(params.presolve)
 
     # Count constraint types
     AL = lp.AL isa CuArray ? Vector(lp.AL) : lp.AL
@@ -1269,6 +1294,7 @@ function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu
     println("  Time limit: ", params.time_limit, " seconds")
     println("  Check interval: ", params.check_iter)
     println("  Print frequency: ", params.print_frequency == -1 ? "Adaptive" : params.print_frequency)
+    println("  Presolve: ", presolve_backend == "NONE" ? "Disabled" : presolve_backend)
     println("  Scaling options:")
     println("    Ruiz scaling: ", params.use_Ruiz_scaling ? "Enabled" : "Disabled")
     println("    Pock-Chambolle scaling: ", params.use_Pock_Chambolle_scaling ? "Enabled" : "Disabled")
@@ -1637,19 +1663,28 @@ println("Objective: ", result.primal_obj)
 See also: [`build_from_mps`](@ref), [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
 """
 function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+    presolve_backend = normalize_presolve_backend(params.presolve)
+    params.presolve = presolve_backend
     presolve_state = nothing
     original_model = model
     presolve_elapsed = 0.0
 
     # Presolve if requested
-    if params.use_presolve
+    if presolve_backend != "NONE"
         presolve_start = time()
-        model, presolve_state = apply_gpu_presolve(
+        model, presolve_state = apply_presolve(
             original_model,
             params;
             presolve_params=presolve_params,
         )
         presolve_elapsed = time() - presolve_start
+    end
+    if params.verbose
+        println("Presolve backend: ", presolve_backend)
+        println("PRESOLVE time: ", @sprintf("%.2f seconds", presolve_elapsed))
+        println("Original model: ", size(original_model.A, 1), " rows, ", size(original_model.A, 2), " cols")
+        println("Presolved model: ", size(model.A, 1), " rows, ", size(model.A, 2), " cols")
+        println()
     end
 
     # Handle warmup if requested
@@ -1710,8 +1745,9 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
 
     if presolve_state !== nothing
         results.presolve_time = presolve_elapsed
-        results.presolve_m0, results.presolve_n0 = size(original_model.A)
-        results.presolve_m1, results.presolve_n1 = size(model.A)
+        results.original_nRows, results.original_nCols = size(original_model.A)
+        results.presolved_nRows, results.presolved_nCols = size(model.A)
+
         postsolve_and_validate_original_kkt!(
             results,
             original_model,
@@ -1719,6 +1755,7 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
             params,
             presolve_params,
         )
+
     end
 
     return results
@@ -1846,6 +1883,7 @@ function solve(model::LP_info_cpu, params::HPRLP_parameters)
             residuals_refreshed = true
         elseif print_yes
             compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info, false)
+            residuals_refreshed = true
             # residuals_to_print = residuals
         end
         if params.use_gpu && ws.pending_last_gap && periodic_check

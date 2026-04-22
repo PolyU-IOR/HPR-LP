@@ -12,6 +12,26 @@ function formulation(A, c, AL, AU, l, u, obj_constant)
     return standard_lp
 end
 
+const VALID_PRESOLVE_BACKENDS = ("GPU", "PSLP", "NONE")
+
+function normalize_presolve_backend(backend)
+    backend_name = if backend isa Bool
+        backend ? "GPU" : "NONE"
+    else
+        uppercase(String(backend))
+    end
+    backend_name in VALID_PRESOLVE_BACKENDS || throw(ArgumentError(
+        "Unsupported presolve backend $(backend). Expected one of GPU, PSLP, NONE."))
+    return backend_name
+end
+
+function set_presolve_backend!(params::HPRLP_parameters, backend)
+    params.presolve = normalize_presolve_backend(backend)
+    return params
+end
+
+presolve_enabled(params::HPRLP_parameters) = normalize_presolve_backend(params.presolve) != "NONE"
+
 function apply_gpu_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
     if params.verbose
         println("GPU PRESOLVE ...")
@@ -43,6 +63,61 @@ function apply_gpu_presolve(model::LP_info_cpu, params::HPRLP_parameters; presol
     end
 
     return reduced_model, presolve_state
+end
+
+function apply_pslp_presolve(model::LP_info_cpu, params::HPRLP_parameters)
+    if !PSLP.is_available()
+        params.verbose && println("PSLP dynamic library not found at $(PSLP.LIB_PATH). Skipping PSLP presolve.")
+        return model, nothing
+    end
+
+    if params.verbose
+        println("PSLP PRESOLVE ...")
+    end
+    t_start = time()
+
+    settings = PSLP.Settings(verbose=params.verbose)
+    presolver_info, reduced_data = PSLP.load_and_run_presolve(
+        model.c,
+        model.A,
+        model.l,
+        model.u,
+        model.AL,
+        model.AU;
+        settings=settings,
+    )
+
+    if params.verbose
+        println(@sprintf("PSLP PRESOLVE time: %.2f seconds", time() - t_start))
+    end
+
+    if reduced_data === nothing || presolver_info === nothing
+        println("PSLP presolve failed or returned nothing.")
+        if presolver_info !== nothing
+            PSLP.free_presolver_wrapper(presolver_info)
+        end
+        return model, nothing
+    end
+
+    c_red, A_red, l_red, u_red, lhs_red, rhs_red, obj_offset = reduced_data
+
+    if params.verbose
+        println("PSLP reduced size: $(size(model.A)) -> $(size(A_red))")
+        println("PSLP objective offset: $(obj_offset)")
+    end
+
+    reduced_model = formulation(A_red, c_red, lhs_red, rhs_red, l_red, u_red, obj_offset)
+    return reduced_model, presolver_info
+end
+
+function apply_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+    backend = normalize_presolve_backend(params.presolve)
+    if backend == "GPU"
+        return apply_gpu_presolve(model, params; presolve_params=presolve_params)
+    elseif backend == "PSLP"
+        return apply_pslp_presolve(model, params)
+    end
+    return model, nothing
 end
 
 # Helper function to create scaling info and apply scaling to the LP problem
