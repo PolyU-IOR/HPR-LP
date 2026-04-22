@@ -2,7 +2,6 @@ module HPRLP
 
 using SparseArrays
 using LinearAlgebra
-using QPSReader
 using CUDA
 using CUDA.CUSPARSE
 using Printf
@@ -15,6 +14,8 @@ using JuMP
 using HDF5
 using Dates
 import MathOptInterface as MOI
+
+include(joinpath(@__DIR__, "..", "MPSReader", "src", "MPSReader.jl"))
 
 include("structs.jl")
 include("utils.jl")

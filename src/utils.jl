@@ -550,13 +550,14 @@ function validate_gpu_parameters!(params::HPRLP_parameters)
 end
 
 """
-    build_from_mps(filename::String, verbose::Bool=true)
+    build_from_mps(filename::AbstractString, verbose::Bool=true; mpsformat::Symbol=:auto)
 
 Build an LP model from an MPS file.
 
 # Arguments
-- `filename::String`: Path to the .mps file
+- `filename::AbstractString`: Path to the `.mps` or `.mps.gz` file
 - `verbose::Bool`: Enable verbose output (default: true)
+- `mpsformat::Symbol`: MPS format hint passed to `MPSReader` (`:auto`, `:fixed`, `:free`)
 
 # Returns
 - `LP_info_cpu`: LP model ready to be solved
@@ -572,16 +573,14 @@ result = optimize(model, params)
 
 See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function build_from_mps(filename::String, verbose::Bool=true)
+function build_from_mps(filename::AbstractString, verbose::Bool=true; mpsformat::Symbol=:auto)
     t_start = time()
     if verbose
         println("READING FILE ... ", filename)
     end
-    io = open(filename)
     lp = Logging.with_logger(Logging.NullLogger()) do
-        readqps(io, mpsformat=:free)
+        MPSReader.read_mps(filename; keep_names=false, mpsformat=mpsformat)
     end
-    close(io)
     read_time = time() - t_start
     if verbose
         println(@sprintf("READING FILE time: %.2f seconds", read_time))
@@ -591,8 +590,8 @@ function build_from_mps(filename::String, verbose::Bool=true)
     if verbose
         println("FORMULATING LP ...")
     end
-    A = sparse(lp.arows, lp.acols, lp.avals, lp.ncon, lp.nvar)
-    standard_lp = formulation(A, lp.c, lp.lcon, lp.ucon, lp.lvar, lp.uvar, lp.c0)
+    A = sparse(lp.arows, lp.acols, lp.avals, lp.nrow, lp.ncol)
+    standard_lp = formulation(A, lp.c, lp.lcon, lp.ucon, lp.lvar, lp.uvar, lp.obj_constant)
     if verbose
         println(@sprintf("FORMULATING LP time: %.2f seconds", time() - t_start))
     end
