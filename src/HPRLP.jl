@@ -2,7 +2,6 @@ module HPRLP
 
 using SparseArrays
 using LinearAlgebra
-using QPSReader
 using CUDA
 using CUDA.CUSPARSE
 using Printf
@@ -16,11 +15,17 @@ using HDF5
 using Dates
 import MathOptInterface as MOI
 
+include(joinpath(@__DIR__, "..", "MPSReader", "src", "MPSReader.jl"))
+
 include("structs.jl")
 include("utils.jl")
 include("kernels.jl")
 include("algorithm.jl")
 include("MOI_wrapper.jl")
+include("PSLP.jl")
+using .PSLP
+include("GPUPresolve.jl")
+using .GPUPresolve
 
 # Export the Optimizer for JuMP usage
 export Optimizer

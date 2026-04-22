@@ -173,6 +173,185 @@ function Halpern_update_cpu!(ws::HPRLP_workspace_cpu, restart_info::HPRLP_restar
     restart_info.inner += 1
 end
 
+function compute_original_kkt_metrics(
+    model::LP_info_cpu,
+    x::AbstractVector{<:Real},
+    y::AbstractVector{<:Real},
+    z::AbstractVector{<:Real},
+)
+    xh = x isa Vector{Float64} ? x : Array(x)
+    yh = y isa Vector{Float64} ? copy(y) : Array(y)
+    zh = z isa Vector{Float64} ? copy(z) : Array(z)
+
+    ALh = copy(model.AL)
+    AUh = copy(model.AU)
+    lh = copy(model.l)
+    uh = copy(model.u)
+    AL_nInf = copy(model.AL)
+    AU_nInf = copy(model.AU)
+
+    ALh[ALh.==-Inf] .= -1.0e100
+    AUh[AUh.==Inf] .= 1.0e100
+    lh[lh.==-Inf] .= -1.0e100
+    uh[uh.==Inf] .= 1.0e100
+    AL_nInf[AL_nInf.==-Inf] .= 0.0
+    AU_nInf[AU_nInf.==Inf] .= 0.0
+
+    @. yh = ifelse((AUh .== 1e100) & (ALh .== -1e100), 0.0,
+        ifelse(AUh .== 1e100, max(yh, 0.0),
+            ifelse(ALh .== -1e100, min(yh, 0.0), yh)))
+
+    @. zh = ifelse((uh .== 1e100) & (lh .== -1e100), 0.0,
+        ifelse(uh .== 1e100, max(zh, 0.0),
+            ifelse(lh .== -1e100, min(zh, 0.0), zh)))
+
+    Ax = model.A * xh
+    ATy = model.AT * yh
+
+    norm_b = 1.0 + norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
+
+    norm_c = 1.0 + norm(model.c)
+
+    err_Ax_sq = 0.0
+    for i in eachindex(Ax)
+        val = Ax[i]
+        lower = ALh[i]
+        upper = AUh[i]
+        err_Ax_sq += max(0.0, lower - val, val - upper)^2
+    end
+    err_Ax = sqrt(err_Ax_sq)
+
+    err_x_sq = 0.0
+    for j in eachindex(xh)
+        val = xh[j]
+        lower = lh[j]
+        upper = uh[j]
+        err_x_sq += max(0.0, lower - val, val - upper)^2
+    end
+    err_x = sqrt(err_x_sq)
+    primal_feas = max(err_Ax, err_x) / norm_b
+
+    dual_residual = model.c .- ATy .- zh
+    dual_feas = norm(dual_residual) / norm_c
+
+    p_lin = dot(model.c, xh)
+    delta_y = sum(((yb, al, au),) -> yb >= 0 ? yb * al : yb * au, zip(yh, ALh, AUh))
+    delta_z = sum(((zb, lb, ub),) -> zb >= 0 ? zb * lb : zb * ub, zip(zh, lh, uh))
+    d_lin = delta_y + delta_z
+
+    gap = abs(d_lin - p_lin) / (1.0 + abs(d_lin) + abs(p_lin))
+    p_obj = p_lin + model.obj_constant
+    d_obj = d_lin + model.obj_constant
+
+    return p_obj, d_obj, primal_feas, dual_feas, gap
+end
+
+function check_org_recovery_failures(
+    p_feas::Real,
+    d_feas::Real,
+    gap::Real,
+    stoptol::Real,
+)
+    failures = String[]
+    if p_feas > stoptol
+        push!(failures, "primal recover failed")
+    end
+    if d_feas > stoptol || gap > stoptol
+        push!(failures, "dual recover failed")
+    end
+    return failures
+end
+
+function postsolve_and_validate_original_kkt!(
+    results::HPRLP_results,
+    original_model::LP_info_cpu,
+    presolve_state,
+    params::HPRLP_parameters,
+    presolve_params=nothing,
+)
+    if params.verbose
+        postsolve_label = if presolve_state isa GPUPresolve.PresolveState
+            "GPU POSTSOLVE"
+        elseif presolve_state isa PSLP.PresolverModel
+            "PSLP POSTSOLVE"
+        else
+            "POSTSOLVE"
+        end
+        println("\n", "="^80)
+        println(postsolve_label)
+        println("="^80)
+    end
+
+    postsolve_start = time()
+    try
+        x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
+        y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
+        z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
+        x_org, y_org, z_org = if presolve_state isa GPUPresolve.PresolveState
+            GPUPresolve.run_postsolve(
+                presolve_state,
+                x_red,
+                y_red,
+                z_red;
+                presolve_params=presolve_params,
+            )
+        elseif presolve_state isa PSLP.PresolverModel
+            PSLP.postsolve(presolve_state, x_red, y_red, z_red)
+        else
+            error("Unsupported presolve state type: $(typeof(presolve_state))")
+        end
+        results.x = x_org
+        results.y = y_org
+        results.z = z_org
+    finally
+        results.postsolve_time = time() - postsolve_start
+        if params.verbose
+            println("Postsolve time: ", @sprintf("%.2f", results.postsolve_time), " seconds")
+        end
+        if presolve_state isa GPUPresolve.PresolveState
+            GPUPresolve.free_presolve_state!(presolve_state)
+        elseif presolve_state isa PSLP.PresolverModel
+            PSLP.free_presolver_wrapper(presolve_state)
+        end
+    end
+
+    if results.status == "OPTIMAL"
+        t_check_start = time()
+        p_obj, d_obj, p_feas, d_feas, gap =
+            compute_original_kkt_metrics(original_model, results.x, results.y, results.z)
+        results.original_p_feas = p_feas
+        results.original_d_feas = d_feas
+        results.original_gap = gap
+        original_kkt_error = max(p_feas, d_feas, gap)
+        original_kkt_passed = original_kkt_error <= params.stoptol
+
+        if !original_kkt_passed
+            failure_reasons = check_org_recovery_failures(
+                p_feas, d_feas, gap, params.stoptol)
+            if params.verbose
+                println("Warning: postsolve original KKT check failed (but the primal solution and objective are reliable): $(join(failure_reasons, "; "))")
+                println("Stop Tolerance: ", @sprintf("%.2e", params.stoptol))
+                println("Primal Objective: ", @sprintf("%+.12e", p_obj))
+                println("Dual Objective: ", @sprintf("%+.12e", d_obj))
+                println("Primal Residual: ", @sprintf("%.6e", p_feas))
+                println("Dual Residual: ", @sprintf("%.6e", d_feas))
+                println("Relative Gap: ", @sprintf("%.6e", gap))
+            end
+        elseif params.verbose
+            println("Postsolve original KKT check passed")
+        end
+        if params.verbose
+            println("Original KKT check time: ", @sprintf("%.2f", time() - t_check_start), " seconds")
+        end
+    else
+        if params.verbose
+            println("Skipping postsolve original KKT check since the reduced solution is not optimal")
+        end
+    end
+
+    return nothing
+end
+
 # the function to compute the residuals for the original LP problem
 function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     lp::LP_info_gpu,
@@ -488,7 +667,7 @@ function check_break(residuals::HPRLP_residuals,
     end
 
     if iter == params.max_iter
-        return "MAX_ITER"
+        return "ITER_LIMIT"
     end
 
     if elapsed_time > params.time_limit
@@ -511,9 +690,9 @@ function collect_results_gpu!(
     tolerance_iters::Vector{Int}
 )
     results = HPRLP_results()
-    results.x = CuVector{Float64}(undef, ws.n)
-    results.y = CuVector{Float64}(undef, ws.m)
-    results.z = CuVector{Float64}(undef, ws.n)
+    results.x = Vector{Float64}(undef, ws.n)
+    results.y = Vector{Float64}(undef, ws.m)
+    results.z = Vector{Float64}(undef, ws.n)
     results.iter = iter
     results.time = time() - t_start_alg
     results.power_time = power_time
@@ -521,9 +700,9 @@ function collect_results_gpu!(
     results.primal_obj = residuals.primal_obj_bar
     results.gap = residuals.rel_gap_bar
     ### copy the results to the CPU ### 
-    results.x .= Vector(sc.b_scale * (ws.x_bar ./ sc.col_norm))
-    results.y .= Vector(sc.c_scale * (ws.y_bar ./ sc.row_norm))
-    results.z .= Vector(sc.c_scale * (ws.z_bar .* sc.col_norm))
+    results.x .= sc.b_scale * Vector(ws.x_bar ./ sc.col_norm)
+    results.y .= sc.c_scale * Vector(ws.y_bar ./ sc.row_norm)
+    results.z .= sc.c_scale * Vector(ws.z_bar .* sc.col_norm)
 
     results.status = status
     # Set tolerance results, using final values if threshold not reached
@@ -533,6 +712,18 @@ function collect_results_gpu!(
     results.iter_6 = tolerance_iters[2] == 0 ? iter : tolerance_iters[2]
     results.time_8 = tolerance_times[3] == 0.0 ? results.time : tolerance_times[3]
     results.iter_8 = tolerance_iters[3] == 0 ? iter : tolerance_iters[3]
+    results.presolve_time = 0.0
+    results.postsolve_time = 0.0
+    results.original_nRows = ws.m
+    results.original_nCols = ws.n
+    results.presolved_nRows = ws.m
+    results.presolved_nCols = ws.n
+    results.reduced_p_feas = residuals.err_Rp_org_bar
+    results.reduced_d_feas = residuals.err_Rd_org_bar
+    results.reduced_gap = residuals.rel_gap_bar
+    results.original_p_feas = NaN
+    results.original_d_feas = NaN
+    results.original_gap = NaN
     return results
 end
 
@@ -569,6 +760,18 @@ function collect_results_cpu!(
     results.iter_6 = tolerance_iters[2] == 0 ? iter : tolerance_iters[2]
     results.time_8 = tolerance_times[3] == 0.0 ? results.time : tolerance_times[3]
     results.iter_8 = tolerance_iters[3] == 0 ? iter : tolerance_iters[3]
+    results.presolve_time = 0.0
+    results.postsolve_time = 0.0
+    results.original_nRows = ws.m
+    results.original_nCols = ws.n
+    results.presolved_nRows = ws.m
+    results.presolved_nCols = ws.n
+    results.reduced_p_feas = residuals.err_Rp_org_bar
+    results.reduced_d_feas = residuals.err_Rd_org_bar
+    results.reduced_gap = residuals.rel_gap_bar
+    results.original_p_feas = NaN
+    results.original_d_feas = NaN
+    results.original_gap = NaN
     return results
 end
 
@@ -1014,6 +1217,8 @@ function setup_gpu_model(model::LP_info_cpu, params::HPRLP_parameters)
         CuVector(model.l),
         CuVector(model.u),
         model.obj_constant,
+        Int32(0),
+        CUDA.zeros(Int32, size(model.AT, 1)),
     )
     CUDA.synchronize()
 
@@ -1053,6 +1258,7 @@ end
 # Helper function to print solver parameters
 function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu,LP_info_gpu})
     m, n = size(lp.A)
+    presolve_backend = normalize_presolve_backend(params.presolve)
 
     # Count constraint types
     AL = lp.AL isa CuArray ? Vector(lp.AL) : lp.AL
@@ -1077,6 +1283,7 @@ function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu
     println("  Time limit: ", params.time_limit, " seconds")
     println("  Check interval: ", params.check_iter)
     println("  Print frequency: ", params.print_frequency == -1 ? "Adaptive" : params.print_frequency)
+    println("  Presolve: ", presolve_backend == "NONE" ? "Disabled" : presolve_backend)
     println("  Scaling options:")
     println("    Ruiz scaling: ", params.use_Ruiz_scaling ? "Enabled" : "Disabled")
     println("    Pock-Chambolle scaling: ", params.use_Pock_Chambolle_scaling ? "Enabled" : "Disabled")
@@ -1480,7 +1687,31 @@ println("Objective: ", result.primal_obj)
 
 See also: [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
 """
-function optimize(model::LP_info_cpu, params::HPRLP_parameters)
+function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+    presolve_backend = normalize_presolve_backend(params.presolve)
+    params.presolve = presolve_backend
+    presolve_state = nothing
+    original_model = model
+    presolve_elapsed = 0.0
+
+    # Presolve if requested
+    if presolve_backend != "NONE"
+        presolve_start = time()
+        model, presolve_state = apply_presolve(
+            original_model,
+            params;
+            presolve_params=presolve_params,
+        )
+        presolve_elapsed = time() - presolve_start
+    end
+    if params.verbose
+        println("Presolve backend: ", presolve_backend)
+        println("PRESOLVE time: ", @sprintf("%.2f seconds", presolve_elapsed))
+        println("Original model: ", size(original_model.A, 1), " rows, ", size(original_model.A, 2), " cols")
+        println("Presolved model: ", size(model.A, 1), " rows, ", size(model.A, 2), " cols")
+        println()
+    end
+
     # Handle warmup if requested
     if params.warm_up
         if params.verbose
@@ -1537,7 +1768,35 @@ function optimize(model::LP_info_cpu, params::HPRLP_parameters)
         println("="^80)
     end
 
+    if presolve_state !== nothing
+        results.presolve_time = presolve_elapsed
+        results.original_nRows, results.original_nCols = size(original_model.A)
+        results.presolved_nRows, results.presolved_nCols = size(model.A)
+
+        postsolve_and_validate_original_kkt!(
+            results,
+            original_model,
+            presolve_state,
+            params,
+            presolve_params,
+        )
+
+    end
+
     return results
+end
+
+function optimize(model::LP_info_cpu, params::HPRLP_parameters)
+    return _optimize_impl(model, params)
+end
+
+function optimize(
+    model::LP_info_cpu,
+    params::HPRLP_parameters,
+    _original_model;
+    presolve_params=nothing,
+)
+    return _optimize_impl(model, params; presolve_params=presolve_params)
 end
 
 """

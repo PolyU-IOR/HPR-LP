@@ -1,3 +1,124 @@
+# The function to read the LP problem from the file and formulate the LP problem
+function formulation(A, c, AL, AU, l, u, obj_constant)
+    # Validate dimensions: A is m x n, c/l/u have length n, AL/AU have length m
+    m, n = size(A)
+    @assert length(c) == n "Dimension mismatch: size(A, 2) = $(n), but length(c) = $(length(c))."
+    @assert length(l) == n "Dimension mismatch: size(A, 2) = $(n), but length(l) = $(length(l))."
+    @assert length(u) == n "Dimension mismatch: size(A, 2) = $(n), but length(u) = $(length(u))."
+    @assert length(AL) == m "Dimension mismatch: size(A, 1) = $(m), but length(AL) = $(length(AL))."
+    @assert length(AU) == m "Dimension mismatch: size(A, 1) = $(m), but length(AU) = $(length(AU))."
+
+    standard_lp = LP_info_cpu(A, transpose(A), c, AL, AU, l, u, obj_constant)
+    return standard_lp
+end
+
+const VALID_PRESOLVE_BACKENDS = ("GPU", "PSLP", "NONE")
+
+function normalize_presolve_backend(backend)
+    backend_name = if backend isa Bool
+        backend ? "GPU" : "NONE"
+    else
+        uppercase(String(backend))
+    end
+    backend_name in VALID_PRESOLVE_BACKENDS || throw(ArgumentError(
+        "Unsupported presolve backend $(backend). Expected one of GPU, PSLP, NONE."))
+    return backend_name
+end
+
+function set_presolve_backend!(params::HPRLP_parameters, backend)
+    params.presolve = normalize_presolve_backend(backend)
+    return params
+end
+
+presolve_enabled(params::HPRLP_parameters) = normalize_presolve_backend(params.presolve) != "NONE"
+
+function apply_gpu_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+    if params.verbose
+        println("GPU PRESOLVE ...")
+    end
+    t_start = time()
+
+    settings = GPUPresolve.Settings(
+        verbose=params.verbose,
+        device_number=params.device_number,
+        presolve_params=presolve_params,
+    )
+    presolve_state, reduced_model = GPUPresolve.run_presolve(model; settings=settings)
+
+    if params.verbose
+        println(@sprintf("GPU PRESOLVE time: %.2f seconds", time() - t_start))
+    end
+
+    if reduced_model === nothing || presolve_state === nothing
+        println("GPU presolve failed or returned nothing.")
+        if presolve_state !== nothing
+            GPUPresolve.free_presolve_state!(presolve_state)
+        end
+        return model, nothing
+    end
+
+    if params.verbose
+        println("GPU presolve reduced size: $(size(model.A)) -> $(size(reduced_model.A))")
+        println("GPU presolve objective offset: $(reduced_model.obj_constant - model.obj_constant)")
+    end
+
+    return reduced_model, presolve_state
+end
+
+function apply_pslp_presolve(model::LP_info_cpu, params::HPRLP_parameters)
+    if !PSLP.is_available()
+        params.verbose && println("PSLP dynamic library not found at $(PSLP.LIB_PATH). Skipping PSLP presolve.")
+        return model, nothing
+    end
+
+    if params.verbose
+        println("PSLP PRESOLVE ...")
+    end
+    t_start = time()
+
+    settings = PSLP.Settings(verbose=params.verbose)
+    presolver_info, reduced_data = PSLP.load_and_run_presolve(
+        model.c,
+        model.A,
+        model.l,
+        model.u,
+        model.AL,
+        model.AU;
+        settings=settings,
+    )
+
+    if params.verbose
+        println(@sprintf("PSLP PRESOLVE time: %.2f seconds", time() - t_start))
+    end
+
+    if reduced_data === nothing || presolver_info === nothing
+        println("PSLP presolve failed or returned nothing.")
+        if presolver_info !== nothing
+            PSLP.free_presolver_wrapper(presolver_info)
+        end
+        return model, nothing
+    end
+
+    c_red, A_red, l_red, u_red, lhs_red, rhs_red, obj_offset = reduced_data
+
+    if params.verbose
+        println("PSLP reduced size: $(size(model.A)) -> $(size(A_red))")
+        println("PSLP objective offset: $(obj_offset)")
+    end
+
+    reduced_model = formulation(A_red, c_red, lhs_red, rhs_red, l_red, u_red, obj_offset)
+    return reduced_model, presolver_info
+end
+
+function apply_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+    backend = normalize_presolve_backend(params.presolve)
+    if backend == "GPU"
+        return apply_gpu_presolve(model, params; presolve_params=presolve_params)
+    elseif backend == "PSLP"
+        return apply_pslp_presolve(model, params)
+    end
+    return model, nothing
+end
 # Helper function to create scaling info and apply scaling to the LP problem
 function scaling!(lp::LP_info_cpu, use_Ruiz_scaling::Bool, use_Pock_Chambolle_scaling::Bool, use_bc_scaling::Bool)
     m, n = size(lp.A)
@@ -430,6 +551,56 @@ function validate_gpu_parameters!(params::HPRLP_parameters)
 end
 
 """
+    build_from_mps(filename::AbstractString, verbose::Bool=true; mpsformat::Symbol=:auto)
+
+Build an LP model from an MPS file.
+
+# Arguments
+- `filename::AbstractString`: Path to the `.mps` or `.mps.gz` file
+- `verbose::Bool`: Enable verbose output (default: true)
+- `mpsformat::Symbol`: MPS format hint passed to `MPSReader` (`:auto`, `:fixed`, `:free`)
+
+# Returns
+- `LP_info_cpu`: LP model ready to be solved
+
+# Example
+```julia
+using HPRLP
+
+model = build_from_mps("problem.mps")
+params = HPRLP_parameters()
+result = optimize(model, params)
+```
+
+See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
+"""
+function build_from_mps(filename::AbstractString, verbose::Bool=true; mpsformat::Symbol=:auto)
+    t_start = time()
+    if verbose
+        println("READING FILE ... ", filename)
+    end
+    lp = Logging.with_logger(Logging.NullLogger()) do
+        MPSReader.read_mps(filename; keep_names=false, mpsformat=mpsformat)
+    end
+    read_time = time() - t_start
+    if verbose
+        println(@sprintf("READING FILE time: %.2f seconds", read_time))
+    end
+
+    t_start = time()
+    if verbose
+        println("FORMULATING LP ...")
+    end
+    A = sparse(lp.arows, lp.acols, lp.avals, lp.nrow, lp.ncol)
+    standard_lp = formulation(A, lp.c, lp.lcon, lp.ucon, lp.lvar, lp.uvar, lp.obj_constant)
+    if verbose
+        println(@sprintf("FORMULATING LP time: %.2f seconds", time() - t_start))
+    end
+
+    return standard_lp
+end
+
+"""
     build_from_Abc(A, c, AL, AU, l, u, obj_constant=0.0)
 
 Build an LP model from matrix form.
@@ -489,8 +660,135 @@ function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     u_copy = copy(u)
 
     # Build the LP model
-    standard_lp = LP_info_cpu(A_copy, transpose(A_copy), c_copy, AL_copy, AU_copy, l_copy, u_copy, obj_constant)
+    standard_lp = formulation(A_copy, c_copy, AL_copy, AU_copy, l_copy, u_copy, obj_constant)
 
     return standard_lp
 end
 
+# the function to test the HPR-LP algorithm on a dataset
+function run_dataset(data_path::String, result_path::String, params::HPRLP_parameters)
+    files = readdir(data_path)
+
+    # Specify the path and filename for the CSV file
+    csv_file = joinpath(result_path, "HPRLP_result.csv")
+
+    # redirect the output to a file
+    log_path = joinpath(result_path, "HPRLP_log.txt")
+
+    if !isdir(result_path)
+        mkdir(result_path)
+    end
+
+    io = open(log_path, "a")
+
+    # if csv file exists, read the existing results, where each column is an any array
+    if isfile(csv_file)
+        result_table = CSV.read(csv_file, DataFrame)
+        namelist = Vector{Any}(result_table.name[1:end-2])
+        iterlist = Vector{Any}(result_table.iter[1:end-2])
+        timelist = Vector{Any}(result_table.alg_time[1:end-2])
+        reslist = Vector{Any}(result_table.res[1:end-2])
+        objlist = Vector{Any}(result_table.primal_obj[1:end-2])
+        statuslist = Vector{Any}(result_table.status[1:end-2])
+        iter4list = Vector{Any}(result_table.iter_4[1:end-2])
+        time4list = Vector{Any}(result_table.time_4[1:end-2])
+        iter6list = Vector{Any}(result_table.iter_6[1:end-2])
+        time6list = Vector{Any}(result_table.time_6[1:end-2])
+        iter8list = Vector{Any}(result_table.iter_8[1:end-2])
+        time8list = Vector{Any}(result_table.time_8[1:end-2])
+    else
+        namelist = []
+        iterlist = []
+        timelist = []
+        reslist = []
+        objlist = []
+        statuslist = []
+        iter4list = []
+        time4list = []
+        iter6list = []
+        time6list = []
+        iter8list = []
+        time8list = []
+    end
+
+
+    for i = 1:length(files)
+        file = files[i]
+        if file in namelist
+            println("The result of problem exists: ", file)
+        end
+        if occursin(".mps", file) && !(file in namelist)
+            FILE_NAME = joinpath(data_path, file)
+            println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
+
+            redirect_stdout(io) do
+                println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
+                println("Solving: ----------------------------------------------------------------------------------------------------------")
+                t_start_all = time()
+
+                # Build and solve the model
+                model = build_from_mps(FILE_NAME, params.verbose)
+                results = optimize(model, params)
+
+                all_time = time() - t_start_all
+                println("Solve complete ----------------------------------------------------------------------------------------------------------")
+
+
+                println("iter = ", results.iter,
+                    @sprintf("  time = %3.2e", results.time),
+                    @sprintf("  residual = %3.2e", results.residuals),
+                    @sprintf("  primal_obj = %3.15e", results.primal_obj),
+                )
+
+                push!(namelist, file)
+                push!(iterlist, results.iter)
+                push!(timelist, min(results.time, params.time_limit))
+                push!(reslist, results.residuals)
+                push!(objlist, results.primal_obj)
+                push!(statuslist, results.status)
+                push!(iter4list, results.iter_4)
+                push!(time4list, min(results.time_4, params.time_limit))
+                push!(iter6list, results.iter_6)
+                push!(time6list, min(results.time_6, params.time_limit))
+                push!(iter8list, results.iter_8)
+                push!(time8list, min(results.time_8, params.time_limit))
+            end
+
+            result_table = DataFrame(name=namelist,
+                iter=iterlist,
+                alg_time=timelist,
+                res=reslist,
+                primal_obj=objlist,
+                status=statuslist,
+                iter_4=iter4list,
+                time_4=time4list,
+                iter_6=iter6list,
+                time_6=time6list,
+                iter_8=iter8list,
+                time_8=time8list
+            )
+
+            # compute the shifted geometric mean of the algorithm_time, put it in the last row
+            geomean_time = exp(mean(log.(timelist .+ 10.0))) - 10.0
+            geomean_time_4 = exp(mean(log.(time4list .+ 10.0))) - 10.0
+            geomean_time_6 = exp(mean(log.(time6list .+ 10.0))) - 10.0
+            geomean_time_8 = exp(mean(log.(time8list .+ 10.0))) - 10.0
+            geomean_iter = exp(mean(log.(iterlist .+ 10.0))) - 10.0
+            geomean_iter_4 = exp(mean(log.(iter4list .+ 10.0))) - 10.0
+            geomean_iter_6 = exp(mean(log.(iter6list .+ 10.0))) - 10.0
+            geomean_iter_8 = exp(mean(log.(iter8list .+ 10.0))) - 10.0
+            push!(result_table, ["SGM10", geomean_iter, geomean_time, "", "", "", geomean_iter_4, geomean_time_4, geomean_iter_6, geomean_time_6, geomean_iter_8, geomean_time_8])
+            # count the number of solved instances, termlist = "OPTIMAL" means solved
+            solved = count(x -> x < params.time_limit, timelist)
+            solved_4 = count(x -> x < params.time_limit, time4list)
+            solved_6 = count(x -> x < params.time_limit, time6list)
+            solved_8 = count(x -> x < params.time_limit, time8list)
+            push!(result_table, ["solved", "", solved, "", "", "", "", solved_4, "", solved_6, "", solved_8])
+
+            CSV.write(csv_file, result_table)
+        end
+    end
+    println("The solver has finished running the dataset, total ", length(files), " problems")
+
+    close(io)
+end

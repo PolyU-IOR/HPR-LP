@@ -1,0 +1,798 @@
+/*
+ * Copyright 2025-2026 Daniel Cederberg
+ *
+ * This file is part of the PSLP project (LP Presolver).
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "Activity.h"
+#include "Constraints.h"
+#include "CoreTransformations.h"
+#include "DTonsEq.h"
+#include "Debugger.h"
+#include "Locks.h"
+#include "Matrix.h"
+#include "Memory_wrapper.h"
+#include "Numerics.h"
+#include "PSLP_API.h"
+#include "PSLP_sol.h"
+#include "PSLP_stats.h"
+#include "PSLP_status.h"
+#include "Parallel_cols.h"
+#include "Parallel_rows.h"
+#include "Postsolver.h"
+#include "Primal_propagation.h"
+#include "Problem.h"
+#include "RowColViews.h"
+#include "SimpleReductions.h"
+#include "Simple_dual_fix.h"
+#include "State.h"
+#include "StonCols.h"
+#include "Tags.h"
+#include "Timer.h"
+#include "Workspace.h"
+#include "dVec.h"
+#include "glbopts.h"
+#include "iVec.h"
+#include "pslp_thread.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+#define NNZ_REMOVED_FAST 0.95
+#define NNZ_REMOVED_CYCLE 0.95
+
+typedef uint8_t Complexity;
+
+enum Complexity
+{
+    FAST = 0,
+    MEDIUM = 1 << 0
+};
+
+PresolveStats *init_stats(size_t n_rows, size_t n_cols, size_t nnz)
+{
+    PresolveStats *stats = (PresolveStats *) ps_calloc(1, sizeof(PresolveStats));
+    stats->n_rows_original = n_rows;
+    stats->n_cols_original = n_cols;
+    stats->nnz_original = nnz;
+    return stats;
+}
+
+void free_settings(Settings *stgs)
+{
+    PS_FREE(stgs);
+}
+
+Settings *default_settings(void)
+{
+    Settings *stgs = (Settings *) ps_malloc(1, sizeof(Settings));
+    RETURN_PTR_IF_NULL(stgs, NULL);
+    stgs->ston_cols = true;
+    stgs->dton_eq = true;
+    stgs->parallel_rows = true;
+    stgs->parallel_cols = true;
+    stgs->primal_propagation = true;
+    stgs->dual_fix = true;
+    stgs->finite_bound_tightening = true;
+    stgs->relax_bounds = false;
+    stgs->max_shift = 10;
+    stgs->max_time = 60.0;
+    stgs->verbose = true;
+    return stgs;
+}
+
+// Helper struct for parallel initialization work
+typedef struct
+{
+    Matrix *A;
+    Work *work;
+    size_t n_cols;
+    size_t n_rows;
+    const double *lbs;
+    const double *ubs;
+    double *lhs_copy;
+    double *rhs_copy;
+    Bound *bounds;
+    ColTag *col_tags;
+    RowTag *row_tags;
+    Lock *locks;
+    Activity *activities;
+    int *row_sizes;
+} ParallelInitData;
+
+// thread function for initializing data
+static void *init_thread_func(void *arg)
+{
+    ParallelInitData *data = (ParallelInitData *) arg;
+
+    data->row_tags = new_rowtags(data->lhs_copy, data->rhs_copy, data->n_rows);
+
+    for (int i = 0; i < data->n_cols; i++)
+    {
+        data->bounds[i].lb = data->lbs[i];
+        data->bounds[i].ub = data->ubs[i];
+
+        if (IS_NEG_INF(data->lbs[i]))
+        {
+            UPDATE_TAG(data->col_tags[i], C_TAG_LB_INF);
+        }
+
+        if (IS_POS_INF(data->ubs[i]))
+        {
+
+            UPDATE_TAG(data->col_tags[i], C_TAG_UB_INF);
+        }
+    }
+
+    data->locks = new_locks(data->A, data->row_tags);
+    data->activities = new_activities(data->A, data->col_tags, data->bounds);
+    count_rows(data->A, data->row_sizes);
+
+    return NULL;
+}
+
+void set_settings_true(Settings *stgs)
+{
+    stgs->ston_cols = true;
+    stgs->dton_eq = true;
+    stgs->parallel_rows = true;
+    stgs->parallel_cols = true;
+    stgs->primal_propagation = true;
+    stgs->dual_fix = true;
+    stgs->finite_bound_tightening = true;
+    stgs->relax_bounds = true;
+    stgs->verbose = true;
+}
+
+void set_settings_false(Settings *stgs)
+{
+    stgs->ston_cols = false;
+    stgs->dton_eq = false;
+    stgs->parallel_rows = false;
+    stgs->parallel_cols = false;
+    stgs->primal_propagation = false;
+    stgs->dual_fix = false;
+    stgs->finite_bound_tightening = false;
+    stgs->relax_bounds = false;
+    stgs->verbose = false;
+}
+
+typedef struct clean_up_scope
+{
+    Matrix *A, *AT;
+    double *lhs_copy, *rhs_copy, *c_copy;
+    int *row_sizes, *col_sizes;
+    RowTag *row_tags;
+    Lock *locks;
+    Activity *activities;
+    State *data;
+    Constraints *constraints;
+    Presolver *presolver;
+    Objective *obj;
+    ColTag *col_tags;
+    Bound *bounds;
+    Work *work;
+} clean_up_scope;
+
+void presolver_clean_up(clean_up_scope scope)
+{
+    free_matrix(scope.A);
+    free_matrix(scope.AT);
+    PS_FREE(scope.lhs_copy);
+    PS_FREE(scope.rhs_copy);
+    PS_FREE(scope.c_copy);
+    PS_FREE(scope.row_sizes);
+    PS_FREE(scope.col_sizes);
+    PS_FREE(scope.row_tags);
+    PS_FREE(scope.col_tags);
+    PS_FREE(scope.bounds);
+    free_activities(scope.activities);
+    free_locks(scope.locks);
+    free_work(scope.work);
+    free_state(scope.data);
+    free_constraints(scope.constraints);
+    free_objective(scope.obj);
+    free_presolver(scope.presolver);
+}
+
+Presolver *new_presolver(const double *Ax, const int *Ai, const int *Ap, size_t m,
+                         size_t n, size_t nnz, const double *lhs, const double *rhs,
+                         const double *lbs, const double *ubs, const double *c,
+                         const Settings *stgs)
+{
+    Timer timer;
+    clock_gettime(CLOCK_MONOTONIC, &timer.start);
+    Matrix *A = NULL, *AT = NULL;
+    double *lhs_copy = NULL, *rhs_copy = NULL, *c_copy = NULL;
+    int *row_sizes = NULL, *col_sizes = NULL;
+    RowTag *row_tags = NULL;
+    Lock *locks = NULL;
+    Activity *activities = NULL;
+    State *data = NULL;
+    Constraints *constraints = NULL;
+    Presolver *presolver = NULL;
+    Objective *obj = NULL;
+    ColTag *col_tags = NULL;
+    Bound *bounds = NULL;
+    Work *work = NULL;
+
+    //  ---------------------------------------------------------------------------
+    //   Copy data and allocate memory. For an exact specification of the
+    //   workspace, see the workspace class. The problem object owns all the
+    //   memory that is allocated in this block of code (and therefore frees it).
+    //  ---------------------------------------------------------------------------
+    size_t n_rows = m;
+    size_t n_cols = n;
+    lhs_copy = (double *) ps_malloc(n_rows, sizeof(double));
+    rhs_copy = (double *) ps_malloc(n_rows, sizeof(double));
+    c_copy = (double *) ps_malloc(n_cols, sizeof(double));
+    col_tags = (ColTag *) ps_calloc(n_cols, sizeof(ColTag));
+    bounds = (Bound *) ps_malloc(n_cols, sizeof(Bound));
+    work = new_work(n_rows, n_cols);
+    row_sizes = (int *) ps_malloc(n_rows, sizeof(int));
+    col_sizes = (int *) ps_malloc(n_cols, sizeof(int));
+
+    if (!lhs_copy || !rhs_copy || !c_copy || !col_tags || !bounds || !work ||
+        !row_sizes || !col_sizes)
+    {
+        goto cleanup;
+    }
+
+    memcpy(lhs_copy, lhs, n_rows * sizeof(double));
+    memcpy(rhs_copy, rhs, n_rows * sizeof(double));
+    memcpy(c_copy, c, n_cols * sizeof(double));
+
+    // ---------------------------------------------------------------------------
+    //  Build bounds, row tags, A and AT. We first build A, then in parallel
+    //  we build AT (main thread) and some other things (second thread).
+    // ---------------------------------------------------------------------------
+    A = matrix_new_no_extra_space(Ax, Ai, Ap, n_rows, n_cols, nnz);
+    if (!A) goto cleanup;
+
+    ps_thread_t thread_id;
+    ParallelInitData parallel_data = {A,    work,     n_cols,   n_rows,   lbs,
+                                      ubs,  lhs_copy, rhs_copy, bounds,   col_tags,
+                                      NULL, NULL,     NULL,     row_sizes};
+
+    ps_thread_create(&thread_id, NULL, init_thread_func, &parallel_data);
+
+    // Main thread: Transpose A and count rows
+    AT = transpose(A, work->iwork_n_cols);
+    if (!AT)
+    {
+        ps_thread_join(&thread_id, NULL);
+        goto cleanup;
+    }
+    count_rows(AT, col_sizes);
+
+    // sync threads
+    ps_thread_join(&thread_id, NULL);
+
+    row_tags = parallel_data.row_tags;
+    if (!row_tags) goto cleanup;
+    locks = parallel_data.locks;
+    activities = parallel_data.activities;
+    if (!locks || !activities) goto cleanup;
+
+    // ---------------------------------------------------------------------------
+    //  Initialize internal data and constraints
+    // ---------------------------------------------------------------------------
+    data = new_state(row_sizes, col_sizes, locks, n_rows, n_cols, activities, work,
+                     row_tags);
+
+    if (!data) goto cleanup;
+    constraints =
+        constraints_new(A, AT, lhs_copy, rhs_copy, bounds, data, row_tags, col_tags);
+    if (!constraints) goto cleanup;
+
+    // ---------------------------------------------------------------------------
+    //             Allocate the actual presolver
+    // ---------------------------------------------------------------------------
+    presolver = (Presolver *) ps_malloc(1, sizeof(Presolver));
+    obj = objective_new(c_copy);
+    if (!presolver || !obj) goto cleanup;
+    presolver->stgs = stgs;
+    presolver->prob = new_problem(constraints, obj);
+    presolver->stats = init_stats(A->m, A->n, nnz);
+    presolver->stats->nnz_removed_trivial = nnz - (size_t) A->nnz; /* explicit 0's */
+    presolver->reduced_prob =
+        (PresolvedProblem *) ps_calloc(1, sizeof(PresolvedProblem));
+    DEBUG(run_debugger(constraints, false));
+
+    // ---------------------------------------------------------------------------
+    //           Allocate space for returning the solution
+    // ---------------------------------------------------------------------------
+    presolver->sol = (Solution *) ps_malloc(1, sizeof(Solution));
+    if (!presolver->sol) goto cleanup;
+    presolver->sol->x = (double *) ps_malloc(n_cols, sizeof(double));
+    presolver->sol->y = (double *) ps_malloc(n_rows, sizeof(double));
+    presolver->sol->z = (double *) ps_malloc(n_cols, sizeof(double));
+    presolver->sol->dim_x = n_cols;
+    presolver->sol->dim_y = n_rows;
+    if (!presolver->sol->x || !presolver->sol->y || !presolver->sol->z)
+    {
+        goto cleanup;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &timer.end);
+    presolver->stats->time_init = GET_ELAPSED_SECONDS(timer);
+
+    return presolver;
+
+cleanup:
+{
+    struct clean_up_scope scope = {
+        A,         AT,       lhs_copy, rhs_copy,   c_copy, row_sizes,
+        col_sizes, row_tags, locks,    activities, data,   constraints,
+        presolver, obj,      col_tags, bounds,     work};
+    presolver_clean_up(scope);
+}
+    return NULL;
+}
+
+/* This function updates the termination criterion for the presolver.
+   We terminate if one of the following conditions is satisfied:
+   1. The problem is infeasible or unbounded.
+   2. A cycle reduced the number of non-zeros by less than
+     (1 - NNZ_REMOVED_CYCLE)%.
+   3. A maximum time limit is reached.
+*/
+static inline bool update_termination(size_t nnz_after_cycle,
+                                      size_t nnz_before_cycle, Complexity complexity,
+                                      PresolveStatus status, double max_time,
+                                      Timer outer_timer)
+{
+    if (HAS_STATUS(status, UNBNDORINFEAS))
+    {
+        return true;
+    }
+
+    if (complexity == MEDIUM &&
+        (double) nnz_after_cycle >= NNZ_REMOVED_CYCLE * (double) nnz_before_cycle)
+    {
+        return true;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &outer_timer.end);
+
+    if (GET_ELAPSED_SECONDS(outer_timer) >= max_time)
+    {
+        printf("Maximum time limit of %.2f seconds reached.\n", max_time);
+        return true;
+    }
+
+    return false;
+}
+
+/* This function updates the complexity class according to
+   the following rules:
+    * If the current complexity is fast, the next complexity is
+      fast if sufficiently many non-zeros were removed, otherwise
+      it is medium.
+    * If the current complexity is medium, the next complexity is
+      fast.
+*/
+static inline Complexity update_complexity(Complexity curr_complexity,
+                                           size_t nnz_before_phase,
+                                           size_t nnz_after_phase)
+{
+    if (curr_complexity == FAST)
+    {
+        if ((double) nnz_after_phase < NNZ_REMOVED_FAST * (double) nnz_before_phase)
+        {
+            return FAST;
+        }
+
+        return MEDIUM;
+    }
+    else if (curr_complexity == MEDIUM)
+    {
+        return FAST;
+    }
+
+    // should never reach here
+    assert(false);
+    return FAST;
+}
+
+/* This function exhaustively removes singleton rows from the problem. It
+   also eliminates empty rows and empty columns. If the problem is feasible
+   and bounded, it returns UNCHANGED (even if the problem was reduced).
+*/
+static inline PresolveStatus run_trivial_explorers(Problem *prob,
+                                                   const Settings *stgs)
+{
+    PresolveStatus status = UNCHANGED;
+
+    // TODO: should we just run this once in the beginning of presolve?
+    // Very important question.
+    status = remove_variables_with_close_bounds(prob);
+    RETURN_IF_INFEASIBLE(status);
+
+    if (stgs->dual_fix)
+    {
+        //   after simple dual fix there can be new empty rows and singleton rows,
+        //   and empty columns (if rows are marked as inactive due to a variable
+        //   being set to inf)
+        status |= remove_empty_cols(prob);
+        status |= simple_dual_fix(prob);
+        RETURN_IF_UNBNDORINFEAS(status);
+    }
+
+    do
+    {
+        status = remove_ston_rows(prob);
+        RETURN_IF_INFEASIBLE(status);
+    } while (status == REDUCED);
+
+    status = remove_empty_rows(prob->constraints);
+    RETURN_IF_INFEASIBLE(status);
+
+    status = remove_empty_cols(prob);
+    RETURN_IF_UNBNDORINFEAS(status);
+
+    assert(prob->constraints->state->ston_rows->len == 0);
+    assert(prob->constraints->state->empty_rows->len == 0);
+    assert(prob->constraints->state->empty_cols->len == 0);
+    return UNCHANGED;
+}
+
+/* This function applies the fastest reductions, which are doubleton equality
+   rows, singleton columns, and simple dual fix. It returns UNCHANGED even if
+   the problem was reduced (provided that the problem does not seem infeasible or
+   bounded). */
+static inline PresolveStatus run_fast_explorers(Problem *prob, const Settings *stgs,
+                                                PresolveStats *stats)
+{
+    assert(prob->constraints->state->ston_rows->len == 0);
+    assert(prob->constraints->state->empty_rows->len == 0);
+    assert(prob->constraints->state->empty_cols->len == 0);
+    PresolveStatus status = UNCHANGED;
+    Timer timer;
+
+    if (stgs->ston_cols)
+    {
+        clock_gettime(CLOCK_MONOTONIC, &timer.start);
+        status |= remove_ston_cols(prob);
+        clock_gettime(CLOCK_MONOTONIC, &timer.end);
+        stats->time_ston_cols += GET_ELAPSED_SECONDS(timer);
+
+        // after removing singleton columns, there can be new empty columns
+        // and singleton rows, but no empty rows
+        assert(prob->constraints->state->empty_rows->len == 0);
+        status |= run_trivial_explorers(prob, stgs);
+    }
+
+    if (stgs->dton_eq)
+    {
+        clock_gettime(CLOCK_MONOTONIC, &timer.start);
+        status |= remove_dton_eq_rows(prob, stgs->max_shift);
+        clock_gettime(CLOCK_MONOTONIC, &timer.end);
+        stats->time_dton_rows += GET_ELAPSED_SECONDS(timer);
+        // after removing doubleton equality rows, there can be new empty rows,
+        // new singleton rows, and new empty columns
+        status |= run_trivial_explorers(prob, stgs);
+    }
+    return status;
+}
+
+/* This function applies the medium complexity presolvers, which are domain
+   propagation and parallel rows. It returns UNCHANGED even if the problem
+   was reduced (provided that the problem is infeasible and bounded). */
+static inline PresolveStatus
+run_medium_explorers(Problem *prob, const Settings *stgs, PresolveStats *stats)
+{
+    assert(prob->constraints->state->ston_rows->len == 0);
+    assert(prob->constraints->state->empty_rows->len == 0);
+    assert(prob->constraints->state->empty_cols->len == 0);
+    DEBUG(verify_no_duplicates_sort(prob->constraints->state->updated_activities));
+    size_t nnz_before;
+    size_t *nnz = &prob->constraints->A->nnz;
+    PresolveStatus status = UNCHANGED;
+    Timer timer;
+
+    if (stgs->primal_propagation)
+    {
+        nnz_before = *nnz;
+
+        // the actual reduction
+        clock_gettime(CLOCK_MONOTONIC, &timer.start);
+        status |= check_activities(prob);
+        status |= propagate_primal(prob, stgs->finite_bound_tightening);
+        clock_gettime(CLOCK_MONOTONIC, &timer.end);
+        stats->time_primal_propagation += GET_ELAPSED_SECONDS(timer);
+
+        // after dom prop propagation there can be new empty and ston rows
+        status |= run_trivial_explorers(prob, stgs);
+        assert(!(status & REDUCED));
+        RETURN_IF_NOT_UNCHANGED(status);
+        stats->nnz_removed_primal_propagation += nnz_before - *nnz;
+    }
+
+    if (stgs->parallel_rows)
+    {
+        nnz_before = *nnz;
+
+        // the actual reduction (after removing parallel rows there can
+        // be no new empty or ston rows so no need to run trivial presolvers)
+        clock_gettime(CLOCK_MONOTONIC, &timer.start);
+        status |= remove_parallel_rows(prob->constraints);
+        clock_gettime(CLOCK_MONOTONIC, &timer.end);
+        stats->time_parallel_rows += GET_ELAPSED_SECONDS(timer);
+        assert(prob->constraints->state->empty_rows->len == 0);
+        assert(prob->constraints->state->ston_rows->len == 0);
+        assert(!(status & REDUCED));
+        RETURN_IF_NOT_UNCHANGED(status);
+        stats->nnz_removed_parallel_rows += nnz_before - *nnz;
+    }
+
+    if (stgs->parallel_cols)
+    {
+        nnz_before = *nnz;
+
+        // the actual reduction (after removing parallel columns there can
+        // be no new empty rows or empty cols but might be new stonrows, probably
+        // although that's rare but it does happen)
+        clock_gettime(CLOCK_MONOTONIC, &timer.start);
+        status |= remove_parallel_cols(prob);
+        clock_gettime(CLOCK_MONOTONIC, &timer.end);
+        stats->time_parallel_cols += GET_ELAPSED_SECONDS(timer);
+        assert(prob->constraints->state->empty_rows->len == 0);
+        assert(prob->constraints->state->empty_cols->len == 0);
+        status |= run_trivial_explorers(prob, stgs);
+        assert(prob->constraints->state->ston_rows->len == 0);
+        assert(!(status & REDUCED));
+        RETURN_IF_NOT_UNCHANGED(status);
+        stats->nnz_removed_parallel_cols += nnz_before - *nnz;
+    }
+
+    return status;
+}
+
+void populate_presolved_problem(Presolver *presolver)
+{
+    PresolvedProblem *reduced_prob = presolver->reduced_prob;
+    Constraints *constraints = presolver->prob->constraints;
+    Matrix *A = constraints->A;
+    reduced_prob->m = A->m;
+    reduced_prob->n = A->n;
+    reduced_prob->nnz = A->nnz;
+    reduced_prob->Ax = A->x;
+    reduced_prob->Ai = A->i;
+    reduced_prob->rhs = constraints->rhs;
+    reduced_prob->lhs = constraints->lhs;
+    reduced_prob->c = presolver->prob->obj->c;
+    reduced_prob->obj_offset = presolver->prob->obj->offset;
+
+    // create bounds arrays
+    reduced_prob->lbs = (double *) malloc(A->n * sizeof(double));
+    reduced_prob->ubs = (double *) malloc(A->n * sizeof(double));
+    for (int i = 0; i < A->n; i++)
+    {
+        reduced_prob->lbs[i] = constraints->bounds[i].lb;
+        reduced_prob->ubs[i] = constraints->bounds[i].ub;
+    }
+
+    // create row pointers
+    reduced_prob->Ap = (int *) malloc((A->m + 1) * sizeof(int));
+    for (int i = 0; i < A->m + 1; i++)
+    {
+        reduced_prob->Ap[i] = A->p[i].start;
+    }
+}
+
+static inline void print_start_message(const PresolveStats *stats)
+{
+    printf("\n\t       PSLP v%s - LP presolver \n\t(c) Daniel "
+           "Cederberg, Stanford University, 2025\n",
+           PSLP_VERSION);
+    printf("Original problem:  %zu rows, %zu columns, %zu nnz\n",
+           stats->n_rows_original, stats->n_cols_original, stats->nnz_original);
+}
+
+static inline void print_end_message(const Matrix *A, const PresolveStats *stats)
+{
+    printf("Presolved problem: %zu rows, %zu columns, %zu nnz\n", A->m, A->n,
+           A->nnz);
+    printf("PSLP init & run time : %.3f seconds, %.3f \n", stats->time_init,
+           stats->time_presolve);
+}
+
+static inline void print_infeas_or_unbnd_message(PresolveStatus status)
+{
+    if (status == INFEASIBLE)
+    {
+        printf("PSLP declares problem as infeasible.\n");
+        return;
+    }
+    else if (status == UNBNDORINFEAS)
+    {
+        printf("PSLP declares problem as infeasible or unbounded.\n");
+        return;
+    }
+
+    // should never reach here
+    assert(false);
+}
+
+static inline PresolveStatus final_status(PresolveStats *stats)
+{
+    if (stats->n_cols_original == stats->n_cols_reduced &&
+        stats->n_rows_original == stats->n_rows_reduced &&
+        stats->nnz_original == stats->nnz_reduced)
+    {
+        return UNCHANGED;
+    }
+    else
+    {
+        return REDUCED;
+    }
+}
+
+PresolveStatus run_presolver(Presolver *presolver)
+{
+    Timer inner_timer, outer_timer;
+    size_t nnz_before_cycle, nnz_after_cycle;
+    size_t nnz_before_phase, nnz_after_phase;
+    size_t nnz_before_reduction;
+    Problem *prob = presolver->prob;
+    PresolveStats *stats = presolver->stats;
+    Matrix *A = presolver->prob->constraints->A;
+    const Settings *stgs = presolver->stgs;
+    Complexity curr_complexity = FAST;
+    bool terminate = false;
+    PresolveStatus status = UNCHANGED;
+    clock_gettime(CLOCK_MONOTONIC, &outer_timer.start);
+
+    if (stgs->verbose)
+    {
+        print_start_message(stats);
+    }
+
+    DEBUG(run_debugger(prob->constraints, false));
+
+    // ------------------------------------------------------------------------
+    // Main loop for the presolver. The logic is organized into phases and
+    // cycles. A phase is a sequence of presolvers belonging to a certain
+    // complexity class. The cycle resets after the medium presolvers.
+    // ------------------------------------------------------------------------
+    nnz_before_cycle = A->nnz;
+    nnz_after_cycle = A->nnz; /* to avoid unitialized variable warning */
+    while (!terminate)
+    {
+        // before each phase we run the trivial presolvers
+        nnz_before_reduction = A->nnz;
+        status = run_trivial_explorers(prob, stgs);
+
+        // run_trivial_explorers returns something else than UNCHANGED only
+        // if the problem is detected to be infeasible or unbounded
+        if (status != UNCHANGED)
+        {
+            break;
+        }
+
+        stats->nnz_removed_trivial += nnz_before_reduction - A->nnz;
+        DEBUG(run_debugger(prob->constraints, false));
+        nnz_before_phase = A->nnz;
+
+        // apply presolvers belonging to a certain complexity class
+        if (curr_complexity == FAST)
+        {
+            nnz_before_reduction = A->nnz;
+            RUN_AND_TIME(run_fast_explorers, inner_timer,
+                         stats->time_fast_reductions, status, prob, stgs, stats);
+            stats->nnz_removed_fast += nnz_before_reduction - A->nnz;
+        }
+        else if (curr_complexity == MEDIUM)
+        {
+            RUN_AND_TIME(run_medium_explorers, inner_timer,
+                         stats->time_medium_reductions, status, prob, stgs, stats);
+            nnz_after_cycle = A->nnz;
+        }
+
+        nnz_after_phase = A->nnz;
+
+        terminate =
+            update_termination(nnz_after_cycle, nnz_before_cycle, curr_complexity,
+                               status, stgs->max_time, outer_timer);
+
+        if (curr_complexity == MEDIUM)
+        {
+            // a new cycle starts after the medium presolvers
+            nnz_before_cycle = nnz_after_cycle;
+        }
+
+        curr_complexity =
+            update_complexity(curr_complexity, nnz_before_phase, nnz_after_phase);
+    }
+
+    if (status != UNCHANGED)
+    {
+        // problem detected to be infeasible or unbounded
+        print_infeas_or_unbnd_message(status);
+        return status;
+    }
+
+    if (stgs->relax_bounds)
+    {
+        remove_redundant_bounds(prob->constraints);
+    }
+
+    problem_clean(prob, true);
+    DEBUG(run_debugger(prob->constraints, true));
+    stats->n_rows_reduced = A->m;
+    stats->n_cols_reduced = A->n;
+    stats->nnz_reduced = A->nnz;
+    DEBUG(run_debugger_stats_consistency_check(stats));
+    populate_presolved_problem(presolver);
+    clock_gettime(CLOCK_MONOTONIC, &outer_timer.end);
+    stats->time_presolve = GET_ELAPSED_SECONDS(outer_timer);
+
+    if (stgs->verbose)
+    {
+        print_end_message(A, stats);
+    }
+
+    return final_status(stats);
+}
+
+void postsolve(Presolver *presolver, const double *x, const double *y,
+               const double *z)
+{
+    Timer timer;
+    Solution *sol = presolver->sol;
+    PresolveStats *stats = presolver->stats;
+    State *data = presolver->prob->constraints->state;
+    PostsolveInfo *postsolve_info = data->postsolve_info;
+    clock_gettime(CLOCK_MONOTONIC, &timer.start);
+    postsolver_update(postsolve_info, stats->n_cols_reduced, stats->n_rows_reduced,
+                      data->work->mappings->cols, data->work->mappings->rows);
+    postsolver_run(postsolve_info, sol, x, y, z);
+    clock_gettime(CLOCK_MONOTONIC, &timer.end);
+    stats->time_postsolve = GET_ELAPSED_SECONDS(timer);
+
+    if (presolver->stgs->verbose)
+    {
+        printf("PSLP postsolve time: %.4f seconds\n", stats->time_postsolve);
+    }
+}
+
+void free_presolver(Presolver *presolver)
+{
+    if (presolver == NULL)
+    {
+        return;
+    }
+
+    free_problem(presolver->prob);
+    PS_FREE(presolver->stats);
+
+    if (presolver->reduced_prob)
+    {
+        PS_FREE(presolver->reduced_prob->Ap);
+        PS_FREE(presolver->reduced_prob->lbs);
+        PS_FREE(presolver->reduced_prob->ubs);
+        PS_FREE(presolver->reduced_prob);
+    }
+
+    if (presolver->sol)
+    {
+        PS_FREE(presolver->sol->x);
+        PS_FREE(presolver->sol->y);
+        PS_FREE(presolver->sol->z);
+        PS_FREE(presolver->sol);
+    }
+
+    PS_FREE(presolver);
+}

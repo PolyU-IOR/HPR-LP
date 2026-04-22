@@ -149,6 +149,8 @@ const SUPPORTED_PARAMETERS = (
     "warm_up",
     "print_frequency",
     "verbose",
+    "presolve",
+    "use_presolve",
 )
 
 function MOI.supports(::Optimizer, param::MOI.RawOptimizerAttribute)
@@ -183,6 +185,10 @@ function MOI.set(model::Optimizer, param::MOI.RawOptimizerAttribute, value)
         model.params.print_frequency = Int(value)
     elseif name == "verbose"
         model.params.verbose = Bool(value)
+    elseif name == "presolve"
+        set_presolve_backend!(model.params, value)
+    elseif name == "use_presolve"
+        set_presolve_backend!(model.params, Bool(value))
     else
         throw(MOI.UnsupportedAttribute(param))
     end
@@ -217,6 +223,10 @@ function MOI.get(model::Optimizer, param::MOI.RawOptimizerAttribute)
         return model.params.print_frequency
     elseif name == "verbose"
         return model.params.verbose
+    elseif name == "presolve"
+        return String(model.params.presolve)
+    elseif name == "use_presolve"
+        return presolve_enabled(model.params)
     end
     throw(MOI.UnsupportedAttribute(param))
 end

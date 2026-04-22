@@ -174,6 +174,7 @@ params.stoptol = 1e-4 # can be adjusted as needed to higher accuracy such as 1e-
 params.device_number = 0
 params.warm_up = true
 params.use_gpu = true
+params.use_presolve = true
 
 run_dataset(data_path, result_path, params)
 
