@@ -1655,38 +1655,6 @@ function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
     return power_time
 end
 
-# The main function for the HPR-LP algorithm
-"""
-    optimize(model::LP_info_cpu, params::HPRLP_parameters)
-
-Optimize a linear program using the HPR-LP algorithm.
-
-This function handles GPU transfer, scaling, and optional warmup internally based on the parameters.
-
-# Arguments
-- `model::LP_info_cpu`: LP model built from `build_from_Abc` or another constructor that returns `LP_info_cpu`
-- `params::HPRLP_parameters`: Solver parameters
-
-# Returns
-- `HPRLP_results`: Solution results including objective value, solution vector, and convergence info
-
-# Example
-```julia
-using HPRLP
-
-model = build_from_Abc(A, c, AL, AU, l, u)
-params = HPRLP_parameters()
-params.stoptol = 1e-6
-params.use_gpu = true
-params.warm_up = true
-
-result = optimize(model, params)
-println("Status: ", result.status)
-println("Objective: ", result.primal_obj)
-```
-
-See also: [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
-"""
 function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
     presolve_backend = normalize_presolve_backend(params.presolve)
     params.presolve = presolve_backend
@@ -1786,6 +1754,37 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
     return results
 end
 
+"""
+    optimize(model::LP_info_cpu, params::HPRLP_parameters)
+
+Optimize a linear program using the HPR-LP algorithm.
+
+This function handles GPU transfer, scaling, and optional warmup internally based on the parameters.
+
+# Arguments
+- `model::LP_info_cpu`: LP model built from `build_from_Abc` or another constructor that returns `LP_info_cpu`
+- `params::HPRLP_parameters`: Solver parameters
+
+# Returns
+- `HPRLP_results`: Solution results including objective value, solution vector, and convergence info
+
+# Example
+```julia
+using HPRLP
+
+model = build_from_Abc(A, c, AL, AU, l, u)
+params = HPRLP_parameters()
+params.stoptol = 1e-6
+params.use_gpu = true
+params.warm_up = true
+
+result = optimize(model, params)
+println("Status: ", result.status)
+println("Objective: ", result.primal_obj)
+```
+
+See also: [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
+"""
 function optimize(model::LP_info_cpu, params::HPRLP_parameters)
     return _optimize_impl(model, params)
 end

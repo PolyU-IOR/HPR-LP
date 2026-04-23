@@ -7,16 +7,16 @@ Complete API documentation for HPRLP. For detailed guides, see:
 ## Main Functions
 
 ```@docs
-build_from_Abc
-optimize
+HPRLP.build_from_Abc
+HPRLP.optimize
 HPRLP.Optimizer
 ```
 
 ## Types
 
 ```@docs
-HPRLP_parameters
-HPRLP_results
+HPRLP.HPRLP_parameters
+HPRLP.HPRLP_results
 ```
 
 ## Quick Reference
