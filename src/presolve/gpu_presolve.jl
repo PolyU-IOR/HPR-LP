@@ -149,6 +149,19 @@ function _log_presolve_memory!(
     return nothing
 end
 
+function _reclaim_presolve_gpu_memory!()
+    GC.gc(true)
+    try
+        CUDA.synchronize()
+    catch
+    end
+    try
+        CUDA.reclaim()
+    catch
+    end
+    return nothing
+end
+
 function _copy_record_with_updates(
     rec::PresolveRecord_gpu;
     m1::Int32=rec.m1,
@@ -802,8 +815,6 @@ function presolve_apply_plan(
         _log_presolve_memory!(pparams, phase, "rebuild:AT_rows"; matrix=AT_rows)
         A_new = compact_csr_by_cols(A_rows, col_red2org_local)
         _log_presolve_memory!(pparams, phase, "rebuild:A_new"; matrix=A_new)
-        AT_new = transpose_csr(A_new)
-        _log_presolve_memory!(pparams, phase, "rebuild:AT_new"; matrix=AT_new)
 
         AL_new = gather_by_red2org(plan.new_AL, row_red2org_local)
         AU_new = gather_by_red2org(plan.new_AU, row_red2org_local)
@@ -826,6 +837,19 @@ function presolve_apply_plan(
             source_slack,
             col_red2org_local,
         )
+
+        A_source = nothing
+        A_rows = nothing
+        AT_rows = nothing
+        old_col_lengths = nothing
+        source_col_lengths = nothing
+        source_leading_slack = nothing
+        source_slack = nothing
+        _reclaim_presolve_gpu_memory!()
+        _log_presolve_memory!(pparams, phase, "rebuild:after_reclaim"; matrix=A_new)
+
+        AT_new = transpose_csr(A_new)
+        _log_presolve_memory!(pparams, phase, "rebuild:AT_new"; matrix=AT_new)
 
         lp_new = LP_info_gpu(
             A_new,
@@ -942,8 +966,6 @@ function presolve_apply_plan(
         _log_presolve_memory!(pparams, phase, "rebuild:AT_rows"; matrix=AT_rows)
         A_new = compact_csr_by_cols(A_rows, col_red2org_local)
         _log_presolve_memory!(pparams, phase, "rebuild:A_new"; matrix=A_new)
-        AT_new = transpose_csr(A_new)
-        _log_presolve_memory!(pparams, phase, "rebuild:AT_new"; matrix=AT_new)
 
         AL_new = gather_by_red2org(plan.new_AL, row_red2org_local)
         AU_new = gather_by_red2org(plan.new_AU, row_red2org_local)
@@ -966,6 +988,19 @@ function presolve_apply_plan(
             source_slack,
             col_red2org_local,
         )
+
+        A_source = nothing
+        A_rows = nothing
+        AT_rows = nothing
+        old_col_lengths = nothing
+        source_col_lengths = nothing
+        source_leading_slack = nothing
+        source_slack = nothing
+        _reclaim_presolve_gpu_memory!()
+        _log_presolve_memory!(pparams, phase, "rebuild:after_reclaim"; matrix=A_new)
+
+        AT_new = transpose_csr(A_new)
+        _log_presolve_memory!(pparams, phase, "rebuild:AT_new"; matrix=AT_new)
 
         lp_new = LP_info_gpu(
             A_new,
