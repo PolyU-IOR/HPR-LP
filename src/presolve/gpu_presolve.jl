@@ -303,13 +303,6 @@ function _compact_virtual_slack_after_gpu(
     return (new_leading_slack, new_slack_after)
 end
 
-function _release_presolve_gpu_temps!()
-    CUDA.synchronize()
-    GC.gc(true)
-    CUDA.reclaim()
-    return nothing
-end
-
 function _collect_removed_global_indices(
     keep_mask_local::CuVector{UInt8},
     old_red2org_global::CuVector{Int32},
@@ -746,6 +739,7 @@ function presolve_apply_plan(
         A_rows = compact_csr_by_rows(A_source, row_red2org_local)
         AT_rows = transpose_csr(A_rows)
         A_new = compact_csr_by_cols(A_rows, col_red2org_local)
+        AT_new = transpose_csr(A_new)
 
         AL_new = gather_by_red2org(plan.new_AL, row_red2org_local)
         AU_new = gather_by_red2org(plan.new_AU, row_red2org_local)
@@ -768,12 +762,6 @@ function presolve_apply_plan(
             source_slack,
             col_red2org_local,
         )
-
-        A_rows = nothing
-        AT_rows = nothing
-        _release_presolve_gpu_temps!()
-
-        AT_new = transpose_csr(A_new)
 
         lp_new = LP_info_gpu(
             A_new,
@@ -877,6 +865,7 @@ function presolve_apply_plan(
         A_rows = compact_csr_by_rows(A_source, row_red2org_local)
         AT_rows = transpose_csr(A_rows)
         A_new = compact_csr_by_cols(A_rows, col_red2org_local)
+        AT_new = transpose_csr(A_new)
 
         AL_new = gather_by_red2org(plan.new_AL, row_red2org_local)
         AU_new = gather_by_red2org(plan.new_AU, row_red2org_local)
@@ -899,12 +888,6 @@ function presolve_apply_plan(
             source_slack,
             col_red2org_local,
         )
-
-        A_rows = nothing
-        AT_rows = nothing
-        _release_presolve_gpu_temps!()
-
-        AT_new = transpose_csr(A_new)
 
         lp_new = LP_info_gpu(
             A_new,
