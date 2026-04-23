@@ -97,6 +97,58 @@ end
            !isnothing(plan.new_AT_slack_after)
 end
 
+@inline _bytes_to_gib(bytes::Integer) = Float64(bytes) / 2.0^30
+
+function _gpu_memory_status_string()
+    available = try
+        CUDA.available_memory()
+    catch
+        nothing
+    end
+
+    total = try
+        CUDA.total_memory()
+    catch
+        nothing
+    end
+
+    if isnothing(available) || isnothing(total)
+        return "gpu_mem=unavailable"
+    end
+
+    used = max(total - available, 0)
+    return string(
+        "gpu_used_gib=",
+        round(_bytes_to_gib(used); digits=3),
+        "/",
+        round(_bytes_to_gib(total); digits=3),
+        ", gpu_free_gib=",
+        round(_bytes_to_gib(available); digits=3),
+    )
+end
+
+function _matrix_shape_string(matrix)
+    m, n = size(matrix)
+    return "dims=($m,$n), nnz=$(length(matrix.nzVal))"
+end
+
+function _log_presolve_memory!(
+    pparams::PresolveParams,
+    phase::Symbol,
+    stage::AbstractString;
+    matrix=nothing,
+    extra::AbstractString="",
+)
+    pparams.verbose || return nothing
+
+    parts = String[">>> [GPU Presolve][$phase][$stage]"]
+    isempty(extra) || push!(parts, String(extra))
+    isnothing(matrix) || push!(parts, _matrix_shape_string(matrix))
+    push!(parts, _gpu_memory_status_string())
+    println(join(parts, ", "))
+    return nothing
+end
+
 function _copy_record_with_updates(
     rec::PresolveRecord_gpu;
     m1::Int32=rec.m1,
@@ -736,10 +788,22 @@ function presolve_apply_plan(
         row_org2red_local, row_red2org_local, m_new = build_maps_from_mask(plan.keep_row_mask)
         col_org2red_local, col_red2org_local, n_new = build_maps_from_mask(plan.keep_col_mask)
 
+        _log_presolve_memory!(
+            pparams,
+            phase,
+            "rebuild:start";
+            matrix=A_source,
+            extra="source_override=$(!isnothing(plan.new_A)), target_dims=($(Int(m_new)),$(Int(n_new))), removed_rows=$(m_old - Int(m_new)), removed_cols=$(n_old - Int(n_new))",
+        )
+
         A_rows = compact_csr_by_rows(A_source, row_red2org_local)
+        _log_presolve_memory!(pparams, phase, "rebuild:A_rows"; matrix=A_rows)
         AT_rows = transpose_csr(A_rows)
+        _log_presolve_memory!(pparams, phase, "rebuild:AT_rows"; matrix=AT_rows)
         A_new = compact_csr_by_cols(A_rows, col_red2org_local)
+        _log_presolve_memory!(pparams, phase, "rebuild:A_new"; matrix=A_new)
         AT_new = transpose_csr(A_new)
+        _log_presolve_memory!(pparams, phase, "rebuild:AT_new"; matrix=AT_new)
 
         AL_new = gather_by_red2org(plan.new_AL, row_red2org_local)
         AU_new = gather_by_red2org(plan.new_AU, row_red2org_local)
@@ -823,6 +887,8 @@ function presolve_apply_plan(
             debug_assert_maps!("row", rec_new.row_org2red, rec_new.row_red2org, Int(rec_new.m0), Int(rec_new.m1))
             debug_assert_maps!("col", rec_new.col_org2red, rec_new.col_red2org, Int(rec_new.n0), Int(rec_new.n1))
         end
+
+        _log_presolve_memory!(pparams, phase, "rebuild:done"; matrix=lp_new.A)
 
         changed = plan.has_change || (Int(m_new) != m_old) || (Int(n_new) != n_old)
         return (lp_new, rec_new, changed)
@@ -862,10 +928,22 @@ function presolve_apply_plan(
         row_org2red_local, row_red2org_local, m_new = build_maps_from_mask(plan.keep_row_mask)
         col_org2red_local, col_red2org_local, n_new = build_maps_from_mask(plan.keep_col_mask)
 
+        _log_presolve_memory!(
+            pparams,
+            phase,
+            "rebuild:start";
+            matrix=A_source,
+            extra="source_override=$(!isnothing(plan.new_A)), target_dims=($(Int(m_new)),$(Int(n_new))), removed_rows=$(m_old - Int(m_new)), removed_cols=$(n_old - Int(n_new))",
+        )
+
         A_rows = compact_csr_by_rows(A_source, row_red2org_local)
+        _log_presolve_memory!(pparams, phase, "rebuild:A_rows"; matrix=A_rows)
         AT_rows = transpose_csr(A_rows)
+        _log_presolve_memory!(pparams, phase, "rebuild:AT_rows"; matrix=AT_rows)
         A_new = compact_csr_by_cols(A_rows, col_red2org_local)
+        _log_presolve_memory!(pparams, phase, "rebuild:A_new"; matrix=A_new)
         AT_new = transpose_csr(A_new)
+        _log_presolve_memory!(pparams, phase, "rebuild:AT_new"; matrix=AT_new)
 
         AL_new = gather_by_red2org(plan.new_AL, row_red2org_local)
         AU_new = gather_by_red2org(plan.new_AU, row_red2org_local)
@@ -950,6 +1028,8 @@ function presolve_apply_plan(
             debug_assert_maps!("col", rec_new.col_org2red, rec_new.col_red2org, Int(rec_new.n0), Int(rec_new.n1))
         end
 
+        _log_presolve_memory!(pparams, phase, "rebuild:done"; matrix=lp_new.A)
+
         changed = plan.has_change || (Int(m_new) != m_old) || (Int(n_new) != n_old)
         return (lp_new, rec_new, changed)
     end
@@ -970,14 +1050,16 @@ function presolve_gpu(
     presolve_params::PresolveParams=PresolveParams(),
 )
     m0, n0 = size(lp.A)
+    presolve_params.verbose = presolve_params.verbose || params.verbose
     presolve_params.record_postsolve_tape = presolve_params.record_postsolve_tape
     _validate_presolve_rule_orders(presolve_params)
     lp_cur = lp
     rec = presolve_identity_record(m0, n0, lp.obj_constant)
 
-    if presolve_params.verbose || params.verbose
+    if presolve_params.verbose
         println(">>> [GPU Presolve] start (m=$m0, n=$n0, max_iters=$(presolve_params.max_iters))")
     end
+    _log_presolve_memory!(presolve_params, :global, "start"; matrix=lp.A)
     t_start = time()
 
     for iter in 1:presolve_params.max_iters
@@ -999,10 +1081,11 @@ function presolve_gpu(
         )
         changed_iter |= changed_col
 
-        if presolve_params.verbose || params.verbose
+        if presolve_params.verbose
             m1, n1 = size(lp_cur.A)
             println(">>> [GPU Presolve] iter=$iter, changed=$changed_iter, dims=($m1, $n1)")
         end
+        _log_presolve_memory!(presolve_params, :global, "iter=$iter"; matrix=lp_cur.A, extra="changed=$changed_iter")
 
         if !changed_iter
             break
@@ -1026,7 +1109,7 @@ function presolve_gpu(
         end
     end
 
-    if presolve_params.verbose || params.verbose
+    if presolve_params.verbose
         m1, n1 = size(lp_cur.A)
         println(
             ">>> [GPU Presolve] done (m=$m0->$m1, n=$n0->$n1) in ",
@@ -1034,6 +1117,7 @@ function presolve_gpu(
             "s",
         )
     end
+    _log_presolve_memory!(presolve_params, :global, "done"; matrix=lp_cur.A)
 
     return (lp_cur, rec)
 end
