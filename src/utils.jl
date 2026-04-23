@@ -665,6 +665,15 @@ function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
     return standard_lp
 end
 
+function release_solve_memory!(params::HPRLP_parameters)
+    GC.gc(true)
+    if params.use_gpu
+        CUDA.synchronize()
+        CUDA.reclaim()
+    end
+    return nothing
+end
+
 # the function to test the HPR-LP algorithm on a dataset
 function run_dataset(data_path::String, result_path::String, params::HPRLP_parameters)
     files = readdir(data_path)
@@ -722,36 +731,44 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
             println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
 
             redirect_stdout(io) do
-                println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
-                println("Solving: ----------------------------------------------------------------------------------------------------------")
-                t_start_all = time()
+                model = nothing
+                results = nothing
+                try
+                    println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
+                    println("Solving: ----------------------------------------------------------------------------------------------------------")
+                    t_start_all = time()
 
-                # Build and solve the model
-                model = build_from_mps(FILE_NAME, params.verbose)
-                results = optimize(model, params)
+                    # Build and solve the model
+                    model = build_from_mps(FILE_NAME, params.verbose)
+                    results = optimize(model, params)
 
-                all_time = time() - t_start_all
-                println("Solve complete ----------------------------------------------------------------------------------------------------------")
+                    all_time = time() - t_start_all
+                    println("Solve complete ----------------------------------------------------------------------------------------------------------")
 
 
-                println("iter = ", results.iter,
-                    @sprintf("  time = %3.2e", results.time),
-                    @sprintf("  residual = %3.2e", results.residuals),
-                    @sprintf("  primal_obj = %3.15e", results.primal_obj),
-                )
+                    println("iter = ", results.iter,
+                        @sprintf("  time = %3.2e", results.time),
+                        @sprintf("  residual = %3.2e", results.residuals),
+                        @sprintf("  primal_obj = %3.15e", results.primal_obj),
+                    )
 
-                push!(namelist, file)
-                push!(iterlist, results.iter)
-                push!(timelist, min(results.time, params.time_limit))
-                push!(reslist, results.residuals)
-                push!(objlist, results.primal_obj)
-                push!(statuslist, results.status)
-                push!(iter4list, results.iter_4)
-                push!(time4list, min(results.time_4, params.time_limit))
-                push!(iter6list, results.iter_6)
-                push!(time6list, min(results.time_6, params.time_limit))
-                push!(iter8list, results.iter_8)
-                push!(time8list, min(results.time_8, params.time_limit))
+                    push!(namelist, file)
+                    push!(iterlist, results.iter)
+                    push!(timelist, min(results.time, params.time_limit))
+                    push!(reslist, results.residuals)
+                    push!(objlist, results.primal_obj)
+                    push!(statuslist, results.status)
+                    push!(iter4list, results.iter_4)
+                    push!(time4list, min(results.time_4, params.time_limit))
+                    push!(iter6list, results.iter_6)
+                    push!(time6list, min(results.time_6, params.time_limit))
+                    push!(iter8list, results.iter_8)
+                    push!(time8list, min(results.time_8, params.time_limit))
+                finally
+                    model = nothing
+                    results = nothing
+                    release_solve_memory!(params)
+                end
             end
 
             result_table = DataFrame(name=namelist,
