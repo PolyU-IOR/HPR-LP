@@ -38,6 +38,39 @@ end
             @warn "MPS test file not found at $mps_file, skipping MPS test"
         end
     end
+
+    @testset "MPS Auto Format Fallback For Long Names" begin
+        mps_text = """
+NAME          LONGNAMES
+ROWS
+ N  OBJ
+ L  R1
+COLUMNS
+    COL000001  R1                 1
+    COL000002  R1                 2
+RHS
+    RHS1      R1                 3
+ENDATA
+"""
+
+        path = tempname() * ".mps"
+        try
+            open(path, "w") do io
+                write(io, mps_text)
+            end
+
+            @test_throws ArgumentError HPRLP.MPSReader.read_mps(path; mpsformat=:fixed)
+
+            lp = HPRLP.MPSReader.read_mps(path; mpsformat=:auto)
+            A = sparse(lp.arows, lp.acols, lp.avals, lp.nrow, lp.ncol)
+
+            @test lp.ncol == 2
+            @test length(lp.avals) == 2
+            @test nnz(A) == 2
+        finally
+            isfile(path) && rm(path)
+        end
+    end
     
     @testset "Basic LP Problem - Direct API" begin
         # Same problem as MPS file:

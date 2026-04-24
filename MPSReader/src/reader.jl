@@ -319,6 +319,36 @@ end
     return 4
 end
 
+@inline function _fixed_gap_has_text(bytes, start::Int, stop::Int, len::Int)
+    lo = max(start, 1)
+    hi = min(stop, len)
+    lo > hi && return false
+    @inbounds for i in lo:hi
+        _isspacebyte(bytes[i]) || return true
+    end
+    return false
+end
+
+function _validate_fixed_line_layout!(bytes, len::Int, nline::Int, section::SectionType)
+    bad_layout = if section == SECTION_ROWS
+        _fixed_gap_has_text(bytes, 4, 4, len)
+    elseif section == SECTION_COLUMNS || section == SECTION_RHS || section == SECTION_RANGES
+        _fixed_gap_has_text(bytes, 13, 14, len) ||
+        _fixed_gap_has_text(bytes, 23, 24, len) ||
+        _fixed_gap_has_text(bytes, 37, 39, len) ||
+        _fixed_gap_has_text(bytes, 48, 49, len)
+    elseif section == SECTION_BOUNDS
+        _fixed_gap_has_text(bytes, 4, 4, len) ||
+        _fixed_gap_has_text(bytes, 13, 14, len) ||
+        _fixed_gap_has_text(bytes, 23, 24, len)
+    else
+        false
+    end
+
+    bad_layout || return nothing
+    throw(ArgumentError("Line $nline overflows fixed-format MPS field widths in the $(section) section; use mpsformat=:free for files with long names or free-format spacing."))
+end
+
 @inline function _span_equals(bytes, start::Int, stop::Int, literal::AbstractString)
     start > stop && return isempty(literal)
     len = stop - start + 1
@@ -1286,10 +1316,12 @@ function _process_fixed_line!(data::MPSData, line::AbstractString, nline::Int, s
         isempty(f1) && (f1 = _trim_range_fast(line, bytes, 5, 12, len))
         return _process_fields!(data, f1, _EMPTY_FIELD, _EMPTY_FIELD, _EMPTY_FIELD, _EMPTY_FIELD, isempty(f1) ? 0 : 1, nline, state)
     elseif state.current_section == SECTION_ROWS
+        _validate_fixed_line_layout!(bytes, len, nline, SECTION_ROWS)
         f1 = _trim_range_fast(line, bytes, 2, 3, len)
         f2 = _trim_range_fast(line, bytes, 5, 12, len)
         return _process_fields!(data, f1, f2, _EMPTY_FIELD, _EMPTY_FIELD, _EMPTY_FIELD, isempty(f1) ? 0 : (isempty(f2) ? 1 : 2), nline, state)
     elseif state.current_section == SECTION_COLUMNS
+        _validate_fixed_line_layout!(bytes, len, nline, SECTION_COLUMNS)
         f1s, f1e = _trim_span_fast(bytes, 5, 12, len)
         f2s, f2e = _trim_span_fast(bytes, 15, 22, len)
         f3s, f3e = _trim_span_fast(bytes, 25, 36, len)
@@ -1307,6 +1339,7 @@ function _process_fixed_line!(data::MPSData, line::AbstractString, nline::Int, s
         end
         return _read_columns_fixed!(data, line, bytes, f1s, f1e, f2s, f2e, f3s, f3e, f4s, f4e, f5s, f5e, nfields, nline, state)
     elseif state.current_section == SECTION_RHS || state.current_section == SECTION_RANGES
+        _validate_fixed_line_layout!(bytes, len, nline, state.current_section)
         f1s, f1e = _trim_span_fast(bytes, 5, 12, len)
         f2s, f2e = _trim_span_fast(bytes, 15, 22, len)
         f3s, f3e = _trim_span_fast(bytes, 25, 36, len)
@@ -1318,6 +1351,7 @@ function _process_fixed_line!(data::MPSData, line::AbstractString, nline::Int, s
         end
         return _read_ranges_fixed!(data, line, bytes, f1s, f1e, f2s, f2e, f3s, f3e, f4s, f4e, f5s, f5e, nfields, nline)
     elseif state.current_section == SECTION_BOUNDS
+        _validate_fixed_line_layout!(bytes, len, nline, SECTION_BOUNDS)
         f1s, f1e = _trim_span_fast(bytes, 2, 3, len)
         f2s, f2e = _trim_span_fast(bytes, 5, 12, len)
         f3s, f3e = _trim_span_fast(bytes, 15, 22, len)
