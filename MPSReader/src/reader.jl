@@ -1296,6 +1296,55 @@ function _process_card!(data::MPSData, card::MPSCard, state::ParserState)
     return _process_fields!(data, card.f1, card.f2, card.f3, card.f4, card.f5, card.nfields, card.nline, state)
 end
 
+function _process_free_line!(data::MPSData, line::AbstractString, nline::Int, state::ParserState)
+    len = ncodeunits(line)
+    len == 0 && return nothing
+    bytes = codeunits(line)
+    firstb = bytes[1]
+
+    if firstb == UInt8('*') || firstb == UInt8('&')
+        return nothing
+    end
+
+    if !_isspacebyte(firstb)
+        header = _parse_section_header(line, nline)
+        return _process_header!(data, header.f1, header.f2, nline, state)
+    end
+
+    f1, f2, f3, f4, f5, _, nfields = _parse_free_fields(line)
+
+    if state.current_section == SECTION_OBJSENSE
+        if f1 == "MIN"
+            data.objsense = :min
+        elseif f1 == "MAX"
+            data.objsense = :max
+        end
+    elseif state.current_section == SECTION_ROWS
+        _read_rows_fields!(data, f1, f2, nfields, nline, state)
+    elseif state.current_section == SECTION_COLUMNS
+        if f2 == "'MARKER'"
+            if f3 == "'INTORG'"
+                state.integer_section = true
+            elseif f3 == "'INTEND'"
+                state.integer_section = false
+            end
+            _reset_column_cache!(state)
+        else
+            _read_columns_fields!(data, f1, f2, f3, f4, f5, nfields, nline, state)
+        end
+    elseif state.current_section == SECTION_RHS
+        _read_rhs_fields!(data, f1, f2, f3, f4, f5, nfields, nline, state)
+    elseif state.current_section == SECTION_BOUNDS
+        _read_bounds_fields!(data, f1, f2, f3, f4, nfields, nline, state)
+    elseif state.current_section == SECTION_RANGES
+        _read_ranges_fields!(data, f1, f2, f3, f4, f5, nfields, nline, state)
+    elseif state.current_section == SECTION_OBJECT_BOUND
+        nothing
+    end
+
+    return nothing
+end
+
 function _process_fixed_line!(data::MPSData, line::AbstractString, nline::Int, state::ParserState)
     len = ncodeunits(line)
     len == 0 && return nothing
@@ -1375,9 +1424,7 @@ function _read_mps_native(io::IO; mpsformat::Symbol = :fixed, keep_names::Bool =
         if mpsformat == :fixed
             _process_fixed_line!(data, line, nline, state)
         else
-            card = _parse_free_card(line, nline)
-            card.iscomment && continue
-            _process_card!(data, card, state)
+            _process_free_line!(data, line, nline, state)
         end
         state.endata_read && break
     end
@@ -1422,11 +1469,8 @@ function _scan_text_lines!(data::MPSData, state::ParserState, text::String, star
             _process_fixed_line!(data, line, nline, state)
             state.endata_read && return nline, stop + 1
         else
-            card = _parse_free_card(line, nline)
-            if !card.iscomment
-                _process_card!(data, card, state)
-                state.endata_read && return nline, stop + 1
-            end
+            _process_free_line!(data, line, nline, state)
+            state.endata_read && return nline, stop + 1
         end
         start = stop + 1
     end
@@ -1497,7 +1541,7 @@ function _read_mps_file(path::String, keep_names::Bool, format::Symbol, hints::C
             return _to_lpfiledata(data; keep_names = keep_names)
         else
             return open(path, "r") do io
-                data = _read_mps_native(io; mpsformat = format, keep_names = keep_names, hints = hints)
+                data = _read_mps_native_chunked(io; mpsformat = format, keep_names = keep_names, hints = hints)
                 return _to_lpfiledata(data; keep_names = keep_names)
             end
         end
