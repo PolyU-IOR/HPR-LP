@@ -139,6 +139,8 @@ function _log_presolve_memory!(
     matrix=nothing,
     extra::AbstractString="",
 )
+    return nothing
+
     pparams.verbose || return nothing
 
     parts = String[">>> [GPU Presolve][$phase][$stage]"]
