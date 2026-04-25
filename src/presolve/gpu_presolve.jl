@@ -139,15 +139,36 @@ function _log_presolve_memory!(
     matrix=nothing,
     extra::AbstractString="",
 )
-    return nothing
-
-    pparams.verbose || return nothing
+    (pparams.verbose && pparams.memory_logging) || return nothing
 
     parts = String[">>> [GPU Presolve][$phase][$stage]"]
     isempty(extra) || push!(parts, String(extra))
     isnothing(matrix) || push!(parts, _matrix_shape_string(matrix))
     push!(parts, _gpu_memory_status_string())
     println(join(parts, ", "))
+    return nothing
+end
+
+@inline function _rule_subset_label(rule_order)
+    return join(String.(rule_order), "+")
+end
+
+function _maybe_reclaim_after_rule_subset!(
+    pparams::PresolveParams,
+    phase::Symbol,
+    rule_order,
+    matrix,
+    changed::Bool,
+)
+    pparams.reclaim_between_rule_subsets || return nothing
+    _reclaim_presolve_gpu_memory!()
+    _log_presolve_memory!(
+        pparams,
+        phase,
+        "subset:after_reclaim";
+        matrix=matrix,
+        extra="rules=$(_rule_subset_label(rule_order)), changed=$changed",
+    )
     return nothing
 end
 
@@ -491,15 +512,52 @@ function _run_phase_rule_subset(
     isempty(rule_order) && return (lp, rec, false)
 
     subset_pparams = _subset_presolve_params(pparams; phase=phase, rule_order=rule_order)
+    _log_presolve_memory!(
+        subset_pparams,
+        phase,
+        "subset:start";
+        matrix=lp.A,
+        extra="rules=$(_rule_subset_label(rule_order))",
+    )
+
     stats = presolve_compute_stats(lp, subset_pparams; phase=phase)
+    _log_presolve_memory!(
+        subset_pparams,
+        phase,
+        "subset:stats";
+        matrix=lp.A,
+        extra="rules=$(_rule_subset_label(rule_order))",
+    )
+
     plan = presolve_make_plan(lp, stats, subset_pparams; phase=phase)
+    _log_presolve_memory!(
+        subset_pparams,
+        phase,
+        "subset:plan";
+        matrix=lp.A,
+        extra="rules=$(_rule_subset_label(rule_order)), has_action=$(_phase_has_action(plan, phase)), has_change=$(plan.has_change)",
+    )
     _throw_terminal_status_if_needed!(plan, phase)
 
     if !_phase_has_action(plan, phase)
+        stats = nothing
+        plan = nothing
+        _maybe_reclaim_after_rule_subset!(subset_pparams, phase, rule_order, lp.A, false)
         return (lp, rec, false)
     end
 
-    return presolve_apply_plan(lp, plan, rec, subset_pparams; phase=phase)
+    lp_next, rec_next, changed = presolve_apply_plan(lp, plan, rec, subset_pparams; phase=phase)
+    _log_presolve_memory!(
+        subset_pparams,
+        phase,
+        "subset:apply";
+        matrix=lp_next.A,
+        extra="rules=$(_rule_subset_label(rule_order)), changed=$changed",
+    )
+    stats = nothing
+    plan = nothing
+    _maybe_reclaim_after_rule_subset!(subset_pparams, phase, rule_order, lp_next.A, changed)
+    return (lp_next, rec_next, changed)
 end
 
 function _run_trivial_cleanup_recirculation(
@@ -1088,6 +1146,7 @@ function presolve_gpu(
 )
     m0, n0 = size(lp.A)
     presolve_params.verbose = presolve_params.verbose || params.verbose
+    presolve_params.memory_logging = presolve_params.memory_logging || params.verbose
     presolve_params.record_postsolve_tape = presolve_params.record_postsolve_tape
     _validate_presolve_rule_orders(presolve_params)
     lp_cur = lp

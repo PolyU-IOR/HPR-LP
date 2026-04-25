@@ -9,11 +9,13 @@ using CUDA.CUSPARSE: CuSparseMatrixCSR
 Base.@kwdef mutable struct PresolveParams
     max_iters::Int = 10
     verbose::Bool = false
+    memory_logging::Bool = false
     debug_checks::Bool = false
     trace_enabled::Bool = false
     trace_path::Union{Nothing,String} = nothing
     record_postsolve_tape::Bool = true
     record_postsolve_tape_cpu::Bool = false
+    reclaim_between_rule_subsets::Bool = false
 
     feasibility_tol::Float64 = 1e-9
     bound_tol::Float64 = 1e-9
