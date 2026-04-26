@@ -99,7 +99,7 @@ end
 
 @inline _bytes_to_gib(bytes::Integer) = Float64(bytes) / 2.0^30
 
-function _gpu_memory_status_string()
+function _gpu_memory_snapshot()
     available = try
         CUDA.available_memory()
     catch
@@ -113,18 +113,63 @@ function _gpu_memory_status_string()
     end
 
     if isnothing(available) || isnothing(total)
-        return "gpu_mem=unavailable"
+        return nothing
     end
 
     used = max(total - available, 0)
-    return string(
+    return (used=Int(used), available=Int(available), total=Int(total))
+end
+
+function _format_gib_delta(bytes::Real)
+    if bytes == 0
+        return "0.0"
+    end
+    sign = bytes > 0 ? "+" : "-"
+    return string(sign, round(_bytes_to_gib(round(Integer, abs(bytes))); digits=3))
+end
+
+@inline function _update_peak_used(peak_used::Union{Nothing,Int}, snapshot)
+    if isnothing(snapshot)
+        return peak_used
+    end
+    return isnothing(peak_used) ? snapshot.used : max(peak_used, snapshot.used)
+end
+
+function _gpu_memory_status_string(
+    snapshot=_gpu_memory_snapshot();
+    start_snapshot=nothing,
+    prev_snapshot=nothing,
+    peak_used::Union{Nothing,Int}=nothing,
+)
+    if isnothing(snapshot)
+        return "gpu_mem=unavailable"
+    end
+
+    parts = String[
         "gpu_used_gib=",
-        round(_bytes_to_gib(used); digits=3),
+        string(round(_bytes_to_gib(snapshot.used); digits=3)),
         "/",
-        round(_bytes_to_gib(total); digits=3),
+        string(round(_bytes_to_gib(snapshot.total); digits=3)),
         ", gpu_free_gib=",
-        round(_bytes_to_gib(available); digits=3),
-    )
+        string(round(_bytes_to_gib(snapshot.available); digits=3)),
+    ]
+
+    if !isnothing(start_snapshot)
+        push!(parts, ", gpu_delta_start_gib=")
+        push!(parts, _format_gib_delta(snapshot.used - start_snapshot.used))
+    end
+
+    if !isnothing(prev_snapshot)
+        push!(parts, ", gpu_delta_prev_gib=")
+        push!(parts, _format_gib_delta(snapshot.used - prev_snapshot.used))
+    end
+
+    if !isnothing(start_snapshot) && !isnothing(peak_used)
+        push!(parts, ", gpu_peak_over_start_gib=")
+        push!(parts, _format_gib_delta(peak_used - start_snapshot.used))
+    end
+
+    return join(parts)
 end
 
 function _matrix_shape_string(matrix)
@@ -138,13 +183,39 @@ function _log_presolve_memory!(
     stage::AbstractString;
     matrix=nothing,
     extra::AbstractString="",
+    snapshot=_gpu_memory_snapshot(),
+    start_snapshot=nothing,
+    prev_snapshot=nothing,
+    peak_used::Union{Nothing,Int}=nothing,
 )
     (pparams.verbose && pparams.memory_logging) || return nothing
 
     parts = String[">>> [GPU Presolve][$phase][$stage]"]
     isempty(extra) || push!(parts, String(extra))
     isnothing(matrix) || push!(parts, _matrix_shape_string(matrix))
-    push!(parts, _gpu_memory_status_string())
+    push!(parts, _gpu_memory_status_string(snapshot; start_snapshot=start_snapshot, prev_snapshot=prev_snapshot, peak_used=peak_used))
+    println(join(parts, ", "))
+    return nothing
+end
+
+function _log_presolve_subset_summary!(
+    pparams::PresolveParams,
+    phase::Symbol,
+    rule_order,
+    changed::Bool,
+    start_snapshot,
+    peak_used::Union{Nothing,Int},
+    end_snapshot,
+)
+    (pparams.verbose && pparams.memory_logging) || return nothing
+    (isnothing(start_snapshot) || isnothing(end_snapshot) || isnothing(peak_used)) && return nothing
+
+    parts = String[">>> [GPU Presolve][$phase][subset:summary]"]
+    push!(parts, "rules=$(_rule_subset_label(rule_order))")
+    push!(parts, "changed=$changed")
+    push!(parts, "peak_extra_gib=$(_format_gib_delta(peak_used - start_snapshot.used))")
+    push!(parts, "net_extra_gib=$(_format_gib_delta(end_snapshot.used - start_snapshot.used))")
+    push!(parts, "recovered_from_peak_gib=$(_format_gib_delta(end_snapshot.used - peak_used))")
     println(join(parts, ", "))
     return nothing
 end
@@ -155,21 +226,10 @@ end
 
 function _maybe_reclaim_after_rule_subset!(
     pparams::PresolveParams,
-    phase::Symbol,
-    rule_order,
-    matrix,
-    changed::Bool,
 )
     pparams.reclaim_between_rule_subsets || return nothing
     _reclaim_presolve_gpu_memory!()
-    _log_presolve_memory!(
-        pparams,
-        phase,
-        "subset:after_reclaim";
-        matrix=matrix,
-        extra="rules=$(_rule_subset_label(rule_order)), changed=$changed",
-    )
-    return nothing
+    return _gpu_memory_snapshot()
 end
 
 function _reclaim_presolve_gpu_memory!()
@@ -512,51 +572,120 @@ function _run_phase_rule_subset(
     isempty(rule_order) && return (lp, rec, false)
 
     subset_pparams = _subset_presolve_params(pparams; phase=phase, rule_order=rule_order)
+    subset_start_snapshot = _gpu_memory_snapshot()
+    peak_used = _update_peak_used(nothing, subset_start_snapshot)
     _log_presolve_memory!(
         subset_pparams,
         phase,
         "subset:start";
         matrix=lp.A,
         extra="rules=$(_rule_subset_label(rule_order))",
+        snapshot=subset_start_snapshot,
     )
 
     stats = presolve_compute_stats(lp, subset_pparams; phase=phase)
+    stats_snapshot = _gpu_memory_snapshot()
+    peak_used = _update_peak_used(peak_used, stats_snapshot)
     _log_presolve_memory!(
         subset_pparams,
         phase,
         "subset:stats";
         matrix=lp.A,
         extra="rules=$(_rule_subset_label(rule_order))",
+        snapshot=stats_snapshot,
+        start_snapshot=subset_start_snapshot,
+        prev_snapshot=subset_start_snapshot,
+        peak_used=peak_used,
     )
 
     plan = presolve_make_plan(lp, stats, subset_pparams; phase=phase)
+    plan_snapshot = _gpu_memory_snapshot()
+    peak_used = _update_peak_used(peak_used, plan_snapshot)
     _log_presolve_memory!(
         subset_pparams,
         phase,
         "subset:plan";
         matrix=lp.A,
         extra="rules=$(_rule_subset_label(rule_order)), has_action=$(_phase_has_action(plan, phase)), has_change=$(plan.has_change)",
+        snapshot=plan_snapshot,
+        start_snapshot=subset_start_snapshot,
+        prev_snapshot=stats_snapshot,
+        peak_used=peak_used,
     )
     _throw_terminal_status_if_needed!(plan, phase)
 
     if !_phase_has_action(plan, phase)
         stats = nothing
         plan = nothing
-        _maybe_reclaim_after_rule_subset!(subset_pparams, phase, rule_order, lp.A, false)
+        end_snapshot = plan_snapshot
+        reclaimed_snapshot = _maybe_reclaim_after_rule_subset!(subset_pparams)
+        if !isnothing(reclaimed_snapshot)
+            end_snapshot = reclaimed_snapshot
+            _log_presolve_memory!(
+                subset_pparams,
+                phase,
+                "subset:after_reclaim";
+                matrix=lp.A,
+                extra="rules=$(_rule_subset_label(rule_order)), changed=false",
+                snapshot=end_snapshot,
+                start_snapshot=subset_start_snapshot,
+                prev_snapshot=plan_snapshot,
+                peak_used=peak_used,
+            )
+        end
+        _log_presolve_subset_summary!(
+            subset_pparams,
+            phase,
+            rule_order,
+            false,
+            subset_start_snapshot,
+            peak_used,
+            end_snapshot,
+        )
         return (lp, rec, false)
     end
 
     lp_next, rec_next, changed = presolve_apply_plan(lp, plan, rec, subset_pparams; phase=phase)
+    apply_snapshot = _gpu_memory_snapshot()
+    peak_used = _update_peak_used(peak_used, apply_snapshot)
     _log_presolve_memory!(
         subset_pparams,
         phase,
         "subset:apply";
         matrix=lp_next.A,
         extra="rules=$(_rule_subset_label(rule_order)), changed=$changed",
+        snapshot=apply_snapshot,
+        start_snapshot=subset_start_snapshot,
+        prev_snapshot=plan_snapshot,
+        peak_used=peak_used,
     )
     stats = nothing
     plan = nothing
-    _maybe_reclaim_after_rule_subset!(subset_pparams, phase, rule_order, lp_next.A, changed)
+    end_snapshot = apply_snapshot
+    reclaimed_snapshot = _maybe_reclaim_after_rule_subset!(subset_pparams)
+    if !isnothing(reclaimed_snapshot)
+        end_snapshot = reclaimed_snapshot
+        _log_presolve_memory!(
+            subset_pparams,
+            phase,
+            "subset:after_reclaim";
+            matrix=lp_next.A,
+            extra="rules=$(_rule_subset_label(rule_order)), changed=$changed",
+            snapshot=end_snapshot,
+            start_snapshot=subset_start_snapshot,
+            prev_snapshot=apply_snapshot,
+            peak_used=peak_used,
+        )
+    end
+    _log_presolve_subset_summary!(
+        subset_pparams,
+        phase,
+        rule_order,
+        changed,
+        subset_start_snapshot,
+        peak_used,
+        end_snapshot,
+    )
     return (lp_next, rec_next, changed)
 end
 
