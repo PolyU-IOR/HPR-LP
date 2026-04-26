@@ -334,6 +334,28 @@ function apply_rule_primal_propagation!(
         return nothing
     end
 
+    rule_start_snapshot = _gpu_memory_snapshot()
+    rule_prev_snapshot_ref = Ref(rule_start_snapshot)
+    rule_peak_used_ref = Ref(_update_peak_used(nothing, rule_start_snapshot))
+
+    function _log_primal_propagation_checkpoint!(stage::AbstractString; extra::AbstractString="")
+        snapshot = _gpu_memory_snapshot()
+        rule_peak_used_ref[] = _update_peak_used(rule_peak_used_ref[], snapshot)
+        _log_presolve_memory!(
+            pparams,
+            :row,
+            "primal_propagation:$stage";
+            matrix=lp.A,
+            extra=extra,
+            snapshot=snapshot,
+            start_snapshot=rule_start_snapshot,
+            prev_snapshot=rule_prev_snapshot_ref[],
+            peak_used=rule_peak_used_ref[],
+        )
+        rule_prev_snapshot_ref[] = snapshot
+        return nothing
+    end
+
     candidate_l = copy(plan.new_l)
     candidate_u = copy(plan.new_u)
     finalized_l = copy(plan.new_l)
@@ -344,6 +366,7 @@ function apply_rule_primal_propagation!(
     row_min_neg_inf_count = CUDA.zeros(Int32, m)
     row_max_pos_inf_count = CUDA.zeros(Int32, m)
     infeasible_flag = CUDA.zeros(UInt8, 1)
+    _log_primal_propagation_checkpoint!("alloc:base_buffers")
 
     compute_row_activity_summary!(
         row_min_fin,
@@ -355,6 +378,7 @@ function apply_rule_primal_propagation!(
         plan.new_u,
         pparams.zero_tol,
     )
+    _log_primal_propagation_checkpoint!("compute:row_activity_summary")
 
     blocks = cld(m, GPU_PRESOLVE_THREADS)
     @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks _kernel_primal_propagation_candidates!(
@@ -377,14 +401,18 @@ function apply_rule_primal_propagation!(
         pparams.bound_tol,
         Int32(m),
     )
+    _log_primal_propagation_checkpoint!("compute:candidate_kernel")
 
     n = length(plan.new_l)
     col_max_abs = CUDA.zeros(Float64, n)
+    _log_primal_propagation_checkpoint!("alloc:col_max_abs")
     compute_col_max_abs!(col_max_abs, lp.AT)
+    _log_primal_propagation_checkpoint!("compute:col_max_abs")
     lower_changed = CUDA.zeros(UInt8, n)
     upper_changed = CUDA.zeros(UInt8, n)
     fixed_mask = CUDA.zeros(UInt8, n)
     fixed_val = CUDA.zeros(Float64, n)
+    _log_primal_propagation_checkpoint!("alloc:finalize_buffers")
     col_blocks = cld(n, GPU_PRESOLVE_THREADS)
     @cuda threads=GPU_PRESOLVE_THREADS blocks=col_blocks _kernel_finalize_primal_propagation!(
         infeasible_flag,
@@ -402,6 +430,7 @@ function apply_rule_primal_propagation!(
         pparams.feasibility_tol,
         Int32(n),
     )
+    _log_primal_propagation_checkpoint!("compute:finalize_kernel")
 
     infeasible = CUDA.@allowscalar Bool(infeasible_flag[1] != UInt8(0))
     if infeasible
@@ -427,6 +456,7 @@ function apply_rule_primal_propagation!(
             if Int(changed_count) > 0
                 support_l_row = CUDA.fill(typemax(Int32), length(plan.new_l))
                 support_u_row = CUDA.fill(typemax(Int32), length(plan.new_u))
+                _log_primal_propagation_checkpoint!("alloc:support_rows", extra="changed_cols=$(Int(changed_count))")
                 support_tol = max(10.0 * pparams.bound_tol, 1.0e-10)
                 @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks _kernel_capture_primal_propagation_support_rows!(
                     support_l_row,
@@ -450,6 +480,7 @@ function apply_rule_primal_propagation!(
                     support_tol,
                     Int32(m),
                 )
+                _log_primal_propagation_checkpoint!("compute:support_rows", extra="changed_cols=$(Int(changed_count))")
                 changed_cols_sel = changed_cols
                 old_l_sel = gather_by_red2org(plan.new_l, changed_cols_sel)
                 old_u_sel = gather_by_red2org(plan.new_u, changed_cols_sel)
@@ -473,6 +504,7 @@ function apply_rule_primal_propagation!(
                     support_u_sel;
                     dual_mode=POSTSOLVE_DUAL_MINIMAL,
                 )
+                _log_primal_propagation_checkpoint!("postsolve:bound_change_records", extra="changed_cols=$(Int(changed_count))")
 
                 if pparams.record_postsolve_tape_cpu
                     for t in 1:Int(changed_count)
@@ -543,6 +575,7 @@ function apply_rule_primal_propagation!(
     row_removed_any = false
     if fixed_count > 0
         row_shift = CUDA.zeros(Float64, m)
+        _log_primal_propagation_checkpoint!("alloc:row_shift", extra="fixed_count=$fixed_count")
         @cuda threads=GPU_PRESOLVE_THREADS blocks=col_blocks _kernel_dual_fix_row_shift!(
             row_shift,
             finite_fixed_mask,
@@ -554,12 +587,15 @@ function apply_rule_primal_propagation!(
             lp.AT.nzVal,
             Int32(n),
         )
+        _log_primal_propagation_checkpoint!("compute:row_shift", extra="fixed_count=$fixed_count")
 
         keep_col_after = UInt8.((plan.keep_col_mask .!= UInt8(0)) .& .!(finite_fixed_mask .!= UInt8(0)))
         _, col_red2org_after, _ = build_maps_from_mask(keep_col_after)
         A_after_cols = compact_csr_by_cols(lp.A, col_red2org_after)
+        _log_primal_propagation_checkpoint!("structural:A_after_cols", extra="fixed_count=$fixed_count")
         row_nnz_after = CUDA.zeros(Int32, m)
         compute_row_nnz!(row_nnz_after, A_after_cols)
+        _log_primal_propagation_checkpoint!("compute:row_nnz_after", extra="fixed_count=$fixed_count")
 
         AL_after = plan.new_AL .- row_shift
         AU_after = plan.new_AU .- row_shift
@@ -586,6 +622,7 @@ function apply_rule_primal_propagation!(
             plan.new_c,
             keep_row_after,
         )
+        _log_primal_propagation_checkpoint!("postsolve:fixed_col_records", extra="fixed_count=$fixed_count, row_removed=$(row_removed_any)")
 
         append_plan_fixed_from_mask!(plan, finite_fixed_mask, fixed_val)
         plan.obj_constant_delta += _stable_presolve_masked_product_sum(plan.new_c, fixed_val, finite_fixed_mask)
@@ -609,6 +646,11 @@ function apply_rule_primal_propagation!(
         plan.has_col_action |= fixed_count > 0
         plan.has_change = true
     end
+
+    _log_primal_propagation_checkpoint!(
+        "done";
+        extra="bound_changed=$(bound_changed_any), fixed_count=$fixed_count, row_removed=$(row_removed_any)",
+    )
 
     return nothing
 end
