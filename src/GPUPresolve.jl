@@ -5,7 +5,7 @@ using LinearAlgebra
 using SparseArrays
 using CUDA: CuVector
 using CUDA.CUSPARSE: CuSparseMatrixCSR
-using ..HPRLP: LP_info_cpu, LP_info_gpu, HPRLP_parameters, setup_gpu_model
+using ..HPRLP: LP_info_cpu, LP_info_gpu, HPRLP_parameters
 
 include("presolve/postsolve_tape.jl")
 include("presolve/presolve_structs.jl")
@@ -63,22 +63,8 @@ function _backend_presolve_params(settings::Settings)
     return pparams
 end
 
-function _reduced_cpu_model(lp::LP_info_gpu)
-    A_cpu = SparseMatrixCSC(lp.A)
-    return LP_info_cpu(
-        A_cpu,
-        SparseMatrixCSC(lp.AT),
-        Array(lp.c),
-        Array(lp.AL),
-        Array(lp.AU),
-        Array(lp.l),
-        Array(lp.u),
-        lp.obj_constant,
-    )
-end
-
 function run_presolve(
-    model::LP_info_cpu;
+    model::LP_info_gpu;
     settings::Union{Nothing,Settings}=nothing,
 )
     stgs = something(settings, Settings())
@@ -95,12 +81,10 @@ function run_presolve(
         return nothing, nothing
     end
 
-    original_model_gpu = setup_gpu_model(model, params)
     presolve_params = _backend_presolve_params(stgs)
     presolve_params.record_postsolve_tape = true
-    reduced_model_gpu, record = presolve_gpu(original_model_gpu, params; presolve_params=presolve_params)
-    reduced_model = _reduced_cpu_model(reduced_model_gpu)
-    return PresolveState(record, original_model_gpu), reduced_model
+    reduced_model_gpu, record = presolve_gpu(model, params; presolve_params=presolve_params)
+    return PresolveState(record, model), reduced_model_gpu
 end
 
 function run_postsolve(

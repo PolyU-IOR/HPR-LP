@@ -32,7 +32,7 @@ end
 
 presolve_enabled(params::HPRLP_parameters) = normalize_presolve_backend(params.presolve) != "NONE"
 
-function apply_gpu_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+function apply_gpu_presolve(model::LP_info_gpu, params::HPRLP_parameters; presolve_params=nothing)
     if params.verbose
         println("GPU PRESOLVE ...")
     end
@@ -113,9 +113,19 @@ end
 function apply_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
     backend = normalize_presolve_backend(params.presolve)
     if backend == "GPU"
-        return apply_gpu_presolve(model, params; presolve_params=presolve_params)
+        throw(ArgumentError("GPU presolve now requires an LP_info_gpu model. Route CPU->GPU transfer through optimize before calling GPU presolve."))
     elseif backend == "PSLP"
         return apply_pslp_presolve(model, params)
+    end
+    return model, nothing
+end
+
+function apply_presolve(model::LP_info_gpu, params::HPRLP_parameters; presolve_params=nothing)
+    backend = normalize_presolve_backend(params.presolve)
+    if backend == "GPU"
+        return apply_gpu_presolve(model, params; presolve_params=presolve_params)
+    elseif backend == "PSLP"
+        throw(ArgumentError("PSLP presolve expects an LP_info_cpu model."))
     end
     return model, nothing
 end

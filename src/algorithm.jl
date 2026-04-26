@@ -1655,6 +1655,23 @@ function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
     return power_time
 end
 
+function _is_gpu_out_of_memory(err)
+    if isdefined(CUDA, :OutOfGPUMemoryError)
+        oom_type = getfield(CUDA, :OutOfGPUMemoryError)
+        isa(err, oom_type) && return true
+    end
+
+    if isdefined(CUDA, :CuError)
+        cuerror_type = getfield(CUDA, :CuError)
+        if isa(err, cuerror_type)
+            return getproperty(err, :code) == CUDA.ERROR_OUT_OF_MEMORY
+        end
+    end
+
+    message = lowercase(sprint(showerror, err))
+    return occursin("out of memory", message) && (occursin("cuda", message) || occursin("gpu", message))
+end
+
 function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
     presolve_backend = normalize_presolve_backend(params.presolve)
     params.presolve = presolve_backend
@@ -1662,14 +1679,33 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
     original_model = model
     presolve_elapsed = 0.0
 
+    # Validate GPU parameters before attempting GPU operations
+    if params.use_gpu
+        validate_gpu_parameters!(params)
+        model = setup_gpu_model(model, params)
+    elseif presolve_backend == "GPU"
+        error("Presolve backend set to GPU, but use_gpu is false. Please set use_gpu=true to use GPU presolve.")
+    end
+
     # Presolve if requested
     if presolve_backend != "NONE"
         presolve_start = time()
-        model, presolve_state = apply_presolve(
-            original_model,
-            params;
-            presolve_params=presolve_params,
-        )
+
+        try
+            model, presolve_state = apply_presolve(
+                model,
+                params;
+                presolve_params=presolve_params,
+            )
+        catch err
+            if presolve_backend == "GPU" && _is_gpu_out_of_memory(err)
+                release_solve_memory!(params)
+                presolve_backend = "NONE"
+                @warn "GPU presolve ran out of memory; falling back to solving the original problem without presolve."
+            else
+                rethrow()
+            end
+        end
         presolve_elapsed = time() - presolve_start
     end
     if params.verbose
@@ -1697,11 +1733,7 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
         params.verbose = false
 
         # Create a copy of the model for warmup
-        warmup_model = LP_info_cpu(
-            copy(model.A), copy(model.AT), copy(model.c),
-            copy(model.AL), copy(model.AU), copy(model.l), copy(model.u),
-            model.obj_constant
-        )
+        warmup_model = deepcopy(model)
 
         # Run warmup solve
         solve(warmup_model, params)
@@ -1827,20 +1859,10 @@ result = solve(model, params)
 
 See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function solve(model::LP_info_cpu, params::HPRLP_parameters)
-    # Validate GPU parameters before attempting GPU operations
-    if params.use_gpu
-        validate_gpu_parameters!(params)
-    end
-
-    # Setup: GPU transfer and scaling
-    if params.use_gpu
-        lp = setup_gpu_model(model, params)
-        scaling_info = setup_scaling(lp, params)
-    else
-        scaling_info = setup_scaling(model, params)
-        lp = model
-    end
+function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
+    # Setup: scaling
+    scaling_info = setup_scaling(model, params)
+    lp = model
 
     # Main optimization algorithm
     if params.verbose
