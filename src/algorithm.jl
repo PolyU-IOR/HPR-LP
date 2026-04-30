@@ -1684,9 +1684,9 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
 
         presolve_elapsed = time() - presolve_start
 
-        if params.use_gpu && presolve_backend != "GPU"
-            model = setup_gpu_model(model, params)
-        end
+    end
+    if params.use_gpu && presolve_backend != "GPU"
+        model = setup_gpu_model(model, params)
     end
     if params.verbose
         println("Presolve backend: ", presolve_backend)
