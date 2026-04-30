@@ -541,19 +541,20 @@ function update_sigma_gpu!(
             pm_over_dm = primal_move / dual_move
             sqrtλ = sqrt(ws.lambda_max)
             ratio = pm_over_dm / sqrtλ
-            fact = exp(-0.05 * (restart_info.current_gap / restart_info.best_gap))
-            temp_1 = max(min(residuals.err_Rd_org_bar, residuals.err_Rp_org_bar), min(residuals.rel_gap_bar, restart_info.current_gap))
-            sigma_cand = exp(fact * log(ratio) + (1 - fact) * log(restart_info.best_sigma))
-            if temp_1 > 9e-10
-                κ = 1.0
-            elseif temp_1 > 5e-10
-                ratio_infeas_org = residuals.err_Rd_org_bar / residuals.err_Rp_org_bar
-                κ = clamp(sqrt(ratio_infeas_org), 1e-2, 100.0)
-            else
-                ratio_infeas_org = residuals.err_Rd_org_bar / residuals.err_Rp_org_bar
-                κ = clamp((ratio_infeas_org), 1e-2, 100.0)
-            end
-            ws.sigma = κ * sigma_cand
+            ws.sigma = ratio
+            # fact = exp(-0.05 * (restart_info.current_gap / restart_info.best_gap))
+            # temp_1 = max(min(residuals.err_Rd_org_bar, residuals.err_Rp_org_bar), min(residuals.rel_gap_bar, restart_info.current_gap))
+            # sigma_cand = exp(fact * log(ratio) + (1 - fact) * log(restart_info.best_sigma))
+            # if temp_1 > 9e-10
+            #     κ = 1.0
+            # elseif temp_1 > 5e-10
+            #     ratio_infeas_org = residuals.err_Rd_org_bar / residuals.err_Rp_org_bar
+            #     κ = clamp(sqrt(ratio_infeas_org), 1e-2, 100.0)
+            # else
+            #     ratio_infeas_org = residuals.err_Rd_org_bar / residuals.err_Rp_org_bar
+            #     κ = clamp((ratio_infeas_org), 1e-2, 100.0)
+            # end
+            # ws.sigma = κ * sigma_cand
         else
             ws.sigma = 1.0
         end
@@ -1157,6 +1158,7 @@ function save_state_to_hdf5(
         file["parameters/max_iter"] = params.max_iter
         file["parameters/time_limit"] = params.time_limit
         file["parameters/check_iter"] = params.check_iter
+        file["parameters/use_Curtis_Reid_scaling"] = params.use_Curtis_Reid_scaling
         file["parameters/use_Ruiz_scaling"] = params.use_Ruiz_scaling
         file["parameters/use_Pock_Chambolle_scaling"] = params.use_Pock_Chambolle_scaling
         file["parameters/use_bc_scaling"] = params.use_bc_scaling
@@ -1237,7 +1239,7 @@ function setup_scaling(lp::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_paramet
         if params.verbose
             println("SCALING LP ON GPU ...")
         end
-        scaling_info = scaling_gpu!(lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
+        scaling_info = scaling_gpu!(lp, params.use_Curtis_Reid_scaling, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
         CUDA.synchronize()
         if params.verbose
             println(@sprintf("SCALING LP ON GPU time: %.2f seconds", time() - t_start))
@@ -1246,7 +1248,7 @@ function setup_scaling(lp::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_paramet
         if params.verbose
             println("SCALING LP ...")
         end
-        scaling_info = scaling!(lp, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
+        scaling_info = scaling!(lp, params.use_Curtis_Reid_scaling, params.use_Ruiz_scaling, params.use_Pock_Chambolle_scaling, params.use_bc_scaling)
         if params.verbose
             println(@sprintf("SCALING LP time: %.2f seconds", time() - t_start))
         end
@@ -1285,6 +1287,7 @@ function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu
     println("  Print frequency: ", params.print_frequency == -1 ? "Adaptive" : params.print_frequency)
     println("  Presolve: ", presolve_backend == "NONE" ? "Disabled" : presolve_backend)
     println("  Scaling options:")
+    println("    Curtis-Reid scaling: ", params.use_Curtis_Reid_scaling ? "Enabled ($(CURTIS_REID_SCALING_ITERS) iterations)" : "Disabled")
     println("    Ruiz scaling: ", params.use_Ruiz_scaling ? "Enabled" : "Disabled")
     println("    Pock-Chambolle scaling: ", params.use_Pock_Chambolle_scaling ? "Enabled" : "Disabled")
     println("    b/c scaling: ", params.use_bc_scaling ? "Enabled" : "Disabled")
@@ -1662,15 +1665,28 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
     original_model = model
     presolve_elapsed = 0.0
 
+    # Validate GPU parameters before attempting GPU operations
+    if params.use_gpu && presolve_backend == "GPU"
+        validate_gpu_parameters!(params)
+        model = setup_gpu_model(model, params)
+    elseif presolve_backend == "GPU" && !params.use_gpu
+        error("Presolve backend set to GPU, but use_gpu is false. Please set use_gpu=true to use GPU presolve.")
+    end
+
     # Presolve if requested
     if presolve_backend != "NONE"
         presolve_start = time()
         model, presolve_state = apply_presolve(
-            original_model,
+            model,
             params;
             presolve_params=presolve_params,
         )
+
         presolve_elapsed = time() - presolve_start
+
+        if params.use_gpu && presolve_backend != "GPU"
+            model = setup_gpu_model(model, params)
+        end
     end
     if params.verbose
         println("Presolve backend: ", presolve_backend)
@@ -1697,11 +1713,7 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
         params.verbose = false
 
         # Create a copy of the model for warmup
-        warmup_model = LP_info_cpu(
-            copy(model.A), copy(model.AT), copy(model.c),
-            copy(model.AL), copy(model.AU), copy(model.l), copy(model.u),
-            model.obj_constant
-        )
+        warmup_model = deepcopy(model)
 
         # Run warmup solve
         solve(warmup_model, params)
@@ -1827,20 +1839,10 @@ result = solve(model, params)
 
 See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function solve(model::LP_info_cpu, params::HPRLP_parameters)
-    # Validate GPU parameters before attempting GPU operations
-    if params.use_gpu
-        validate_gpu_parameters!(params)
-    end
-
-    # Setup: GPU transfer and scaling
-    if params.use_gpu
-        lp = setup_gpu_model(model, params)
-        scaling_info = setup_scaling(lp, params)
-    else
-        scaling_info = setup_scaling(model, params)
-        lp = model
-    end
+function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
+    # Setup: scaling
+    scaling_info = setup_scaling(model, params)
+    lp = model
 
     # Main optimization algorithm
     if params.verbose

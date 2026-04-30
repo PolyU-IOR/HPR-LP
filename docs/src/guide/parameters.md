@@ -10,6 +10,7 @@ HPRLP provides extensive customization through the `HPRLP_parameters` type. This
 | `max_iter` | Int | ~2.1B | > 0 | Maximum iterations |
 | `time_limit` | Float64 | 3600.0 | > 0 | Time limit (seconds) |
 | `check_iter` | Int | 150 | > 0 | Convergence check interval |
+| `use_Curtis_Reid_scaling` | Bool | true | true/false | 20-iteration Curtis-Reid geometric-mean scaling before Ruiz |
 | `use_Ruiz_scaling` | Bool | true | true/false | Ruiz equilibration |
 | `use_Pock_Chambolle_scaling` | Bool | true | true/false | Pock-Chambolle scaling |
 | `use_bc_scaling` | Bool | true | true/false | b/c vector scaling |
@@ -81,7 +82,17 @@ params.check_iter = 200  # Check less frequently
 
 ## Scaling Parameters
 
-Scaling improves numerical stability and convergence. HPRLP supports three types of scaling that can be combined.
+Scaling improves numerical stability and convergence. HPRLP supports four types of scaling that can be combined.
+
+### `use_Curtis_Reid_scaling::Bool`
+**Default:** `true`
+
+Enable Curtis-Reid geometric-mean scaling before Ruiz scaling. This balances the logarithmic magnitudes of nonzero matrix entries by alternating row and column log-scale updates.
+When enabled, the solver uses 20 Curtis-Reid iterations.
+
+```julia
+params.use_Curtis_Reid_scaling = true
+```
 
 ### `use_Ruiz_scaling::Bool`
 **Default:** `true`
@@ -112,9 +123,9 @@ params.use_bc_scaling = true  # Recommended for most problems
 ```
 
 !!! note "Scaling Recommendations"
-    - Keep all three scaling options enabled (default) for most problems
+    - Keep all scaling options enabled (default) for most problems
     - Disable only if you have a well-conditioned problem or specific numerical concerns
-    - All three can be used simultaneously for best results
+    - All scaling options can be used simultaneously for best results
 
 ## GPU Parameters
 

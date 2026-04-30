@@ -21,6 +21,7 @@ Parameters for the HPR-LP solver.
 - `max_iter::Int`: Maximum number of iterations (default: typemax(Int32))
 - `time_limit::Float64`: Time limit in seconds (default: 3600.0)
 - `check_iter::Int`: Interval for residual checks (default: 150)
+- `use_Curtis_Reid_scaling::Bool`: Enable Curtis-Reid geometric-mean scaling before Ruiz (default: true)
 - `use_Ruiz_scaling::Bool`: Enable Ruiz scaling (default: true)
 - `use_Pock_Chambolle_scaling::Bool`: Enable Pock-Chambolle scaling (default: true)
 - `use_bc_scaling::Bool`: Enable b/c scaling (default: true)
@@ -63,6 +64,9 @@ mutable struct HPRLP_parameters
 
     # the check interval for the residuals, default is 150
     check_iter::Int
+
+    # whether to use Curtis-Reid geometric-mean scaling before Ruiz, default is true
+    use_Curtis_Reid_scaling::Bool
 
     # whether to use the Ruiz scaling, default is true
     use_Ruiz_scaling::Bool
@@ -113,7 +117,7 @@ mutable struct HPRLP_parameters
     use_postsolve::Bool
 
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false)
 end
 
 """

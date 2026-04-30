@@ -140,6 +140,7 @@ const SUPPORTED_PARAMETERS = (
     "max_iter",
     "time_limit",
     "check_iter",
+    "use_Curtis_Reid_scaling",
     "use_Ruiz_scaling",
     "use_Pock_Chambolle_scaling",
     "use_bc_scaling",
@@ -167,6 +168,8 @@ function MOI.set(model::Optimizer, param::MOI.RawOptimizerAttribute, value)
         model.params.time_limit = Float64(value)
     elseif name == "check_iter"
         model.params.check_iter = Int(value)
+    elseif name == "use_Curtis_Reid_scaling"
+        model.params.use_Curtis_Reid_scaling = Bool(value)
     elseif name == "use_Ruiz_scaling"
         model.params.use_Ruiz_scaling = Bool(value)
     elseif name == "use_Pock_Chambolle_scaling"
@@ -205,6 +208,8 @@ function MOI.get(model::Optimizer, param::MOI.RawOptimizerAttribute)
         return model.params.time_limit
     elseif name == "check_iter"
         return model.params.check_iter
+    elseif name == "use_Curtis_Reid_scaling"
+        return model.params.use_Curtis_Reid_scaling
     elseif name == "use_Ruiz_scaling"
         return model.params.use_Ruiz_scaling
     elseif name == "use_Pock_Chambolle_scaling"

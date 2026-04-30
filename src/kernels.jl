@@ -943,6 +943,110 @@ end
 
 # GPU kernels for scaling operations
 
+function compute_curtis_reid_row_log_scale_kernel!(
+    row_log_scale::CuDeviceVector{Float64},
+    rowPtr::CuDeviceVector{Int32},
+    colVal::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    col_log_scale::CuDeviceVector{Float64},
+    m::Int,
+)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= m
+        @inbounds begin
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            count = end_idx >= start_idx ? end_idx - start_idx + 1 : Int32(0)
+            total = 0.0
+            for k in start_idx:end_idx
+                total += -log(max(abs(nzVal[k]), 1.0e-300)) - col_log_scale[colVal[k]]
+            end
+            row_log_scale[i] = count > 0 ? total / Float64(count) : 0.0
+        end
+    end
+    return
+end
+
+function compute_curtis_reid_col_log_scale_kernel!(
+    col_log_scale::CuDeviceVector{Float64},
+    colPtr::CuDeviceVector{Int32},
+    rowVal::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    row_log_scale::CuDeviceVector{Float64},
+    n::Int,
+)
+    j = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if j <= n
+        @inbounds begin
+            start_idx = colPtr[j]
+            end_idx = colPtr[j + 1] - 1
+            count = end_idx >= start_idx ? end_idx - start_idx + 1 : Int32(0)
+            total = 0.0
+            for k in start_idx:end_idx
+                total += -log(max(abs(nzVal[k]), 1.0e-300)) - row_log_scale[rowVal[k]]
+            end
+            col_log_scale[j] = count > 0 ? total / Float64(count) : 0.0
+        end
+    end
+    return
+end
+
+function curtis_reid_log_to_scale_kernel!(
+    scale::CuDeviceVector{Float64},
+    log_scale::CuDeviceVector{Float64},
+    n::Int,
+)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= n
+        @inbounds scale[i] = min(max(exp(log_scale[i]), 1.0e-30), 1.0e30)
+    end
+    return
+end
+
+function scale_curtis_reid_rows_cols_csr_kernel!(
+    rowPtr::CuDeviceVector{Int32},
+    colVal::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    row_scale::CuDeviceVector{Float64},
+    col_scale::CuDeviceVector{Float64},
+    m::Int,
+)
+    i = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if i <= m
+        @inbounds begin
+            scale_i = row_scale[i]
+            start_idx = rowPtr[i]
+            end_idx = rowPtr[i + 1] - 1
+            for k in start_idx:end_idx
+                nzVal[k] *= scale_i * col_scale[colVal[k]]
+            end
+        end
+    end
+    return
+end
+
+function scale_curtis_reid_cols_rows_csr_kernel!(
+    rowPtr::CuDeviceVector{Int32},
+    rowVal::CuDeviceVector{Int32},
+    nzVal::CuDeviceVector{Float64},
+    row_scale::CuDeviceVector{Float64},
+    col_scale::CuDeviceVector{Float64},
+    n::Int,
+)
+    j = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
+    if j <= n
+        @inbounds begin
+            scale_j = col_scale[j]
+            start_idx = rowPtr[j]
+            end_idx = rowPtr[j + 1] - 1
+            for k in start_idx:end_idx
+                nzVal[k] *= row_scale[rowVal[k]] * scale_j
+            end
+        end
+    end
+    return
+end
+
 # Kernel to compute row-wise maximum of absolute values for CSR matrix
 function compute_row_max_abs_kernel!(rowPtr::CuDeviceVector{Int32},
     nzVal::CuDeviceVector{Float64},
