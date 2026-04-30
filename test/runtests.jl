@@ -190,7 +190,7 @@ ENDATA
         @test params.time_limit == 3600.0
         @test params.check_iter == 150
         @test params.use_Curtis_Reid_scaling == true
-        @test params.curtis_reid_niters == 10
+        @test HPRLP.CURTIS_REID_SCALING_ITERS == 20
         @test params.use_Ruiz_scaling == true
         @test params.use_Pock_Chambolle_scaling == true
         @test params.use_bc_scaling == true

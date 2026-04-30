@@ -542,19 +542,19 @@ function update_sigma_gpu!(
             sqrtλ = sqrt(ws.lambda_max)
             ratio = pm_over_dm / sqrtλ
             ws.sigma = ratio
-            # fact = exp(-0.05 * (restart_info.current_gap / restart_info.best_gap))
-            # temp_1 = max(min(residuals.err_Rd_org_bar, residuals.err_Rp_org_bar), min(residuals.rel_gap_bar, restart_info.current_gap))
-            # sigma_cand = exp(fact * log(ratio) + (1 - fact) * log(restart_info.best_sigma))
-            # if temp_1 > 9e-10
-            #     κ = 1.0
-            # elseif temp_1 > 5e-10
-            #     ratio_infeas_org = residuals.err_Rd_org_bar / residuals.err_Rp_org_bar
-            #     κ = clamp(sqrt(ratio_infeas_org), 1e-2, 100.0)
-            # else
-            #     ratio_infeas_org = residuals.err_Rd_org_bar / residuals.err_Rp_org_bar
-            #     κ = clamp((ratio_infeas_org), 1e-2, 100.0)
-            # end
-            # ws.sigma = κ * sigma_cand
+            fact = exp(-0.05 * (restart_info.current_gap / restart_info.best_gap))
+            temp_1 = max(min(residuals.err_Rd_org_bar, residuals.err_Rp_org_bar), min(residuals.rel_gap_bar, restart_info.current_gap))
+            sigma_cand = exp(fact * log(ratio) + (1 - fact) * log(restart_info.best_sigma))
+            if temp_1 > 9e-10
+                κ = 1.0
+            elseif temp_1 > 5e-10
+                ratio_infeas_org = residuals.err_Rd_org_bar / residuals.err_Rp_org_bar
+                κ = clamp(sqrt(ratio_infeas_org), 1e-2, 100.0)
+            else
+                ratio_infeas_org = residuals.err_Rd_org_bar / residuals.err_Rp_org_bar
+                κ = clamp((ratio_infeas_org), 1e-2, 100.0)
+            end
+            ws.sigma = κ * sigma_cand
         else
             ws.sigma = 1.0
         end
@@ -1665,9 +1665,12 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
     original_model = model
     presolve_elapsed = 0.0
 
-    # Validate GPU parameters before attempting GPU operations
-    if params.use_gpu && presolve_backend == "GPU"
+    if params.use_gpu
         validate_gpu_parameters!(params)
+    end
+
+    # Transfer once before GPU presolve so presolve and solve share the same GPU model.
+    if presolve_backend == "GPU" && params.use_gpu
         model = setup_gpu_model(model, params)
     elseif presolve_backend == "GPU" && !params.use_gpu
         error("Presolve backend set to GPU, but use_gpu is false. Please set use_gpu=true to use GPU presolve.")
