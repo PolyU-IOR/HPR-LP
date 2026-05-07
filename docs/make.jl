@@ -5,9 +5,10 @@ makedocs(
     sitename = "HPRLP.jl",
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", nothing) == "true",
-        canonical = "https://PolyU-IOR.github.io/HPR-LP",
+        canonical = get(ENV, "HPRLP_DOCS_CANONICAL", "https://PolyU-IOR.github.io/HPR-LP"),
         assets = String[],
     ),
+    build = get(ENV, "HPRLP_DOCS_BUILD_DIR", "build"),
     modules = [HPRLP],
     pages = [
         "Home" => "index.md",

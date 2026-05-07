@@ -23,6 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check out main for tag deployments
+        if: github.event_name != 'pull_request' && github.ref_type == 'tag'
+        run: git checkout main
       - uses: julia-actions/setup-julia@v1
         with:
           version: '1.10'
@@ -31,8 +36,58 @@ jobs:
         run: julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
       - name: Build HPRLP
         run: julia --project=docs -e 'using Pkg; Pkg.build("HPRLP")'
-      - name: Build docs
+      - name: Build dev docs
+        env:
+          HPRLP_DOCS_BUILD_DIR: site/dev
+          HPRLP_DOCS_CANONICAL: https://PolyU-IOR.github.io/HPR-LP/dev/
         run: julia --project=docs docs/make.jl
+      - name: Build stable docs
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          latest_tag=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          if [[ -z "$latest_tag" ]]; then
+            echo "No v* release tag found; using dev docs as stable docs."
+            cp -a docs/site/dev docs/site/stable
+            exit 0
+          fi
+          stable_worktree="../hprlp-stable-docs"
+          trap 'git worktree remove --force "$stable_worktree" 2>/dev/null || true' EXIT
+          git worktree add --detach "$stable_worktree" "$latest_tag"
+          cp docs/make.jl "$stable_worktree/docs/make.jl"
+          pushd "$stable_worktree"
+          julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate(); Pkg.build("HPRLP")'
+          HPRLP_DOCS_BUILD_DIR="$GITHUB_WORKSPACE/docs/site/stable" \
+          HPRLP_DOCS_CANONICAL="https://PolyU-IOR.github.io/HPR-LP/stable/" \
+          julia --project=docs docs/make.jl
+          popd
+          git worktree remove --force "$stable_worktree"
+          trap - EXIT
+      - name: Prepare Pages root
+        if: github.event_name != 'pull_request'
+        run: |
+          cat > docs/site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta http-equiv="refresh" content="0; url=stable/">
+              <link rel="canonical" href="https://PolyU-IOR.github.io/HPR-LP/stable/">
+              <title>HPRLP.jl Documentation</title>
+            </head>
+            <body>
+              <p><a href="stable/">Open the stable HPRLP.jl documentation.</a></p>
+            </body>
+          </html>
+          HTML
+          cat > docs/site/versions.js <<'JS'
+          var DOC_VERSIONS = [
+            "stable",
+            "dev",
+          ];
+          var DOCUMENTER_NEWEST = "stable";
+          var DOCUMENTER_STABLE = "stable";
+          JS
       - name: Configure Pages
         if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
@@ -40,7 +95,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/build
+          path: docs/site
 
   deploy:
     if: github.event_name != 'pull_request'
