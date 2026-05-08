@@ -544,7 +544,6 @@ function _kernel_replay_dual_tape_all_with_bound_changes!(
                     coeff = @inbounds tape_val[val0 + 1 + (pos - idx0)]
                     zj -= coeff * @inbounds(y_org[row])
                 end
-                @inbounds x_org[col] = fixed_val
                 @inbounds z_org[col] = zj
                 @inbounds z_retrieved[col] = UInt8(1)
             elseif reduction_type == Int32(FIXED_COL_INF)
