@@ -32,37 +32,61 @@ end
 
 presolve_enabled(params::HPRLP_parameters) = normalize_presolve_backend(params.presolve) != "NONE"
 
-function apply_gpu_presolve(model::LP_info_gpu, params::HPRLP_parameters; presolve_params=nothing)
-    if params.verbose
-        println("GPU PRESOLVE ...")
-    end
-    t_start = time()
-
-    settings = GPUPresolve.Settings(
-        verbose=params.verbose,
-        device_number=params.device_number,
-        presolve_params=presolve_params,
-    )
-    presolve_state, reduced_model = GPUPresolve.run_presolve(model; settings=settings)
-
-    if params.verbose
-        println(@sprintf("GPU PRESOLVE time: %.2f seconds", time() - t_start))
-    end
-
-    if reduced_model === nothing || presolve_state === nothing
-        println("GPU presolve failed or returned nothing.")
-        if presolve_state !== nothing
-            GPUPresolve.free_presolve_state!(presolve_state)
+function run_presolve_with_fallback(
+    runner::Function,
+    backend_name::AbstractString,
+    model,
+    params::HPRLP_parameters,
+)
+    try
+        return runner()
+    catch err
+        @warn "$(backend_name) presolve failed; falling back to the original model." exception=(err, catch_backtrace())
+        if backend_name == "GPU" && params.use_gpu && CUDA.functional()
+            try
+                CUDA.synchronize()
+                CUDA.reclaim()
+            catch reclaim_err
+                @warn "GPU presolve fallback cleanup failed after presolve error." exception=(reclaim_err, catch_backtrace())
+            end
         end
         return model, nothing
     end
+end
 
-    if params.verbose
-        println("GPU presolve reduced size: $(size(model.A)) -> $(size(reduced_model.A))")
-        println("GPU presolve objective offset: $(reduced_model.obj_constant - model.obj_constant)")
+function apply_gpu_presolve(model::LP_info_gpu, params::HPRLP_parameters; presolve_params=nothing)
+    return run_presolve_with_fallback("GPU", model, params) do
+        if params.verbose
+            println("GPU PRESOLVE ...")
+        end
+        t_start = time()
+
+        settings = GPUPresolve.Settings(
+            verbose=params.verbose,
+            device_number=params.device_number,
+            presolve_params=presolve_params,
+        )
+        presolve_state, reduced_model = GPUPresolve.run_presolve(model; settings=settings)
+
+        if params.verbose
+            println(@sprintf("GPU PRESOLVE time: %.2f seconds", time() - t_start))
+        end
+
+        if reduced_model === nothing || presolve_state === nothing
+            println("GPU presolve failed or returned nothing.")
+            if presolve_state !== nothing
+                GPUPresolve.free_presolve_state!(presolve_state)
+            end
+            return model, nothing
+        end
+
+        if params.verbose
+            println("GPU presolve reduced size: $(size(model.A)) -> $(size(reduced_model.A))")
+            println("GPU presolve objective offset: $(reduced_model.obj_constant - model.obj_constant)")
+        end
+
+        return reduced_model, presolve_state
     end
-
-    return reduced_model, presolve_state
 end
 
 function apply_pslp_presolve(model::LP_info_cpu, params::HPRLP_parameters)
@@ -71,43 +95,45 @@ function apply_pslp_presolve(model::LP_info_cpu, params::HPRLP_parameters)
         return model, nothing
     end
 
-    if params.verbose
-        println("PSLP PRESOLVE ...")
-    end
-    t_start = time()
-
-    settings = PSLP.Settings(verbose=params.verbose)
-    presolver_info, reduced_data = PSLP.load_and_run_presolve(
-        model.c,
-        model.A,
-        model.l,
-        model.u,
-        model.AL,
-        model.AU;
-        settings=settings,
-    )
-
-    if params.verbose
-        println(@sprintf("PSLP PRESOLVE time: %.2f seconds", time() - t_start))
-    end
-
-    if reduced_data === nothing || presolver_info === nothing
-        println("PSLP presolve failed or returned nothing.")
-        if presolver_info !== nothing
-            PSLP.free_presolver_wrapper(presolver_info)
+    return run_presolve_with_fallback("PSLP", model, params) do
+        if params.verbose
+            println("PSLP PRESOLVE ...")
         end
-        return model, nothing
+        t_start = time()
+
+        settings = PSLP.Settings(verbose=params.verbose)
+        presolver_info, reduced_data = PSLP.load_and_run_presolve(
+            model.c,
+            model.A,
+            model.l,
+            model.u,
+            model.AL,
+            model.AU;
+            settings=settings,
+        )
+
+        if params.verbose
+            println(@sprintf("PSLP PRESOLVE time: %.2f seconds", time() - t_start))
+        end
+
+        if reduced_data === nothing || presolver_info === nothing
+            println("PSLP presolve failed or returned nothing.")
+            if presolver_info !== nothing
+                PSLP.free_presolver_wrapper(presolver_info)
+            end
+            return model, nothing
+        end
+
+        c_red, A_red, l_red, u_red, lhs_red, rhs_red, obj_offset = reduced_data
+
+        if params.verbose
+            println("PSLP reduced size: $(size(model.A)) -> $(size(A_red))")
+            println("PSLP objective offset: $(obj_offset)")
+        end
+
+        reduced_model = formulation(A_red, c_red, lhs_red, rhs_red, l_red, u_red, obj_offset)
+        return reduced_model, presolver_info
     end
-
-    c_red, A_red, l_red, u_red, lhs_red, rhs_red, obj_offset = reduced_data
-
-    if params.verbose
-        println("PSLP reduced size: $(size(model.A)) -> $(size(A_red))")
-        println("PSLP objective offset: $(obj_offset)")
-    end
-
-    reduced_model = formulation(A_red, c_red, lhs_red, rhs_red, l_red, u_red, obj_offset)
-    return reduced_model, presolver_info
 end
 
 function apply_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)

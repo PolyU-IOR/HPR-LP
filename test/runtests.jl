@@ -119,6 +119,29 @@ ENDATA
         @test result.x[2] >= -1e-6
     end
 
+    @testset "Presolve Failure Falls Back To Original Model" begin
+        A = sparse([-1.0 -2.0; -3.0 -1.0])
+        AL = Vector{Float64}([-10.0, -12.0])
+        AU = Vector{Float64}([Inf, Inf])
+        c = Vector{Float64}([-3.0, -5.0])
+        l = Vector{Float64}([0.0, 0.0])
+        u = Vector{Float64}([Inf, Inf])
+
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+        params = make_test_params()
+
+        reduced_model, presolve_state = HPRLP.run_presolve_with_fallback("PSLP", model, params) do
+            error("simulated presolver failure")
+        end
+
+        @test reduced_model === model
+        @test presolve_state === nothing
+
+        result = HPRLP.optimize(model, params)
+        @test result.status == "OPTIMAL"
+        @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+    end
+
     @testset "Original KKT Metrics" begin
         A = sparse([1.0;;])
         AL = [1.0]
