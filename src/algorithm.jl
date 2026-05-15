@@ -272,7 +272,7 @@ function postsolve_and_validate_original_kkt!(
     if params.verbose
         postsolve_label = if presolve_state isa GPUPresolve.PresolveState
             "GPU POSTSOLVE"
-        elseif presolve_state isa PSLP.PresolverModel
+        elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
             "PSLP POSTSOLVE"
         else
             "POSTSOLVE"
@@ -295,7 +295,7 @@ function postsolve_and_validate_original_kkt!(
                 z_red;
                 presolve_params=presolve_params,
             )
-        elseif presolve_state isa PSLP.PresolverModel
+        elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
             PSLP.postsolve(presolve_state, x_red, y_red, z_red)
         else
             error("Unsupported presolve state type: $(typeof(presolve_state))")
@@ -310,7 +310,7 @@ function postsolve_and_validate_original_kkt!(
         end
         if presolve_state isa GPUPresolve.PresolveState
             GPUPresolve.free_presolve_state!(presolve_state)
-        elseif presolve_state isa PSLP.PresolverModel
+        elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
             PSLP.free_presolver_wrapper(presolve_state)
         end
     end

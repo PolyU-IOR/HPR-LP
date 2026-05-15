@@ -3,6 +3,7 @@ using HPRLP
 using JuMP
 using SparseArrays
 using LinearAlgebra
+using Distributed
 
 function make_test_params(; use_gpu::Bool=false)
     params = HPRLP.HPRLP_parameters()
@@ -140,6 +141,15 @@ ENDATA
         result = HPRLP.optimize(model, params)
         @test result.status == "OPTIMAL"
         @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+    end
+
+    @testset "PSLP Worker Isolation Bootstrap" begin
+        worker_id = HPRLP.PSLP._spawn_isolated_worker()
+        try
+            @test remotecall_fetch(HPRLP.PSLP._remote_ping, worker_id) == worker_id
+        finally
+            rmprocs(worker_id)
+        end
     end
 
     @testset "Original KKT Metrics" begin

@@ -1,5 +1,6 @@
 module PSLP
 
+using Distributed
 using Libdl
 using SparseArrays
 
@@ -18,6 +19,12 @@ function _ensure_available()
     is_available() || error("PSLP dynamic library not found at $LIB_PATH.\n" * "Please check your build steps.")
     return nothing
 end
+
+function _pslp_process_isolation_enabled()
+    return get(ENV, "HPRLP_PSLP_DISABLE_ISOLATION", "0") != "1"
+end
+
+_pslp_project_dir() = normpath(joinpath(@__DIR__, ".."))
 
 # ================= C Struct Definitions =================
 # Fixed: Cint -> Csize_t to match C 'size_t' (8 bytes on 64-bit)
@@ -65,6 +72,19 @@ mutable struct PresolverModel
     end
 end
 
+const ACTIVE_REMOTE_PRESOLVER = Ref{Union{Nothing,PresolverModel}}(nothing)
+
+mutable struct RemotePresolverModel
+    worker_id::Int
+    active::Bool
+
+    function RemotePresolverModel(worker_id::Int)
+        obj = new(worker_id, true)
+        finalizer(free_presolver_wrapper, obj)
+        return obj
+    end
+end
+
 function free_presolver_wrapper(model::PresolverModel)
     if model.ptr != C_NULL
         _with_silent_stdio() do
@@ -76,6 +96,27 @@ function free_presolver_wrapper(model::PresolverModel)
         ccall((:free_settings, LIB_PATH), Cvoid, (Ptr{Settings},), model.settings_ptr)
         model.settings_ptr = C_NULL
     end
+end
+
+function free_presolver_wrapper(model::RemotePresolverModel)
+    if !model.active
+        return nothing
+    end
+
+    try
+        remotecall_wait(model.worker_id) do
+            HPRLP.PSLP._remote_free_presolver!()
+        end
+    catch
+    end
+
+    try
+        rmprocs(model.worker_id)
+    catch
+    end
+
+    model.active = false
+    return nothing
 end
 
 function _default_settings_ptr()
@@ -127,10 +168,16 @@ function _with_silent_stdio(f::Function)
     end
 end
 
+function _remote_free_presolver!()
+    model = ACTIVE_REMOTE_PRESOLVER[]
+    if model !== nothing
+        ACTIVE_REMOTE_PRESOLVER[] = nothing
+        free_presolver_wrapper(model)
+    end
+    return nothing
+end
 
-# ================= Core Functions =================
-
-function load_and_run_presolve(
+function _remote_prepare_presolve(
     c::Vector{Float64},
     A::SparseMatrixCSC{Float64,<:Integer},
     l::Vector{Float64},
@@ -139,7 +186,61 @@ function load_and_run_presolve(
     rhs::Vector{Float64};
     settings::Union{Nothing,Settings}=nothing,
 )
-    
+    _remote_free_presolver!()
+    model, reduced_data = load_and_run_presolve_local(
+        c,
+        A,
+        l,
+        u,
+        lhs,
+        rhs;
+        settings=settings,
+    )
+
+    if reduced_data === nothing || model === nothing
+        if model !== nothing
+            free_presolver_wrapper(model)
+        end
+        return nothing
+    end
+
+    ACTIVE_REMOTE_PRESOLVER[] = model
+    return reduced_data
+end
+
+function _remote_postsolve(
+    x_red::Vector{Float64},
+    y_red::Vector{Float64},
+    z_red::Vector{Float64},
+)
+    model = ACTIVE_REMOTE_PRESOLVER[]
+    model === nothing && error("Remote PSLP presolver state is unavailable.")
+    return postsolve(model, x_red, y_red, z_red)
+end
+
+_remote_ping() = myid()
+
+function _spawn_isolated_worker()
+    worker_id = only(addprocs(1; exeflags="--project=$(_pslp_project_dir())"))
+    Distributed.remotecall_eval(Main, worker_id, :(using HPRLP))
+    return worker_id
+end
+
+
+# ================= Core Functions =================
+
+function load_and_run_presolve_local(
+    c::Vector{Float64},
+    A::SparseMatrixCSC{Float64,<:Integer},
+    l::Vector{Float64},
+    u::Vector{Float64},
+    lhs::Vector{Float64},
+    rhs::Vector{Float64};
+    settings::Union{Nothing,Settings}=nothing,
+)
+    m, n = size(A)
+    nnz_val = nnz(A)
+
     # 1. Convert CSC to CSR (using transpose trick)
     A_trans = sparse(transpose(A))
     
@@ -147,9 +248,6 @@ function load_and_run_presolve(
     Ai_c = Vector{Cint}(A_trans.rowval .- 1) 
     Ap_c = Vector{Cint}(A_trans.colptr .- 1)
     
-    m, n = size(A)
-    nnz_val = nnz(A)
-
     # 2. Call C Interface
     stgs_ptr = _allocate_settings_ptr(settings)
     
@@ -201,6 +299,41 @@ function load_and_run_presolve(
     A_red = sparse(transpose(A_red_trans))
 
     return model, (c_red, A_red, lbs_red, ubs_red, lhs_red, rhs_red, red_prob.obj_offset)
+end
+
+function load_and_run_presolve(
+    c::Vector{Float64},
+    A::SparseMatrixCSC{Float64,<:Integer},
+    l::Vector{Float64},
+    u::Vector{Float64},
+    lhs::Vector{Float64},
+    rhs::Vector{Float64};
+    settings::Union{Nothing,Settings}=nothing,
+)
+    if !_pslp_process_isolation_enabled()
+        return load_and_run_presolve_local(c, A, l, u, lhs, rhs; settings=settings)
+    end
+
+    worker_id = _spawn_isolated_worker()
+    try
+        reduced_data = remotecall_fetch(worker_id, c, A, l, u, lhs, rhs, settings) do c, A, l, u, lhs, rhs, settings
+            HPRLP.PSLP._remote_prepare_presolve(c, A, l, u, lhs, rhs; settings=settings)
+        end
+
+        if reduced_data === nothing
+            rmprocs(worker_id)
+            return nothing, nothing
+        end
+
+        return RemotePresolverModel(worker_id), reduced_data
+    catch err
+        try
+            rmprocs(worker_id)
+        catch
+        end
+        @warn "PSLP isolated worker failed during presolve; falling back to the original model." exception=(err, catch_backtrace())
+        return nothing, nothing
+    end
 end
 
 """
@@ -255,6 +388,23 @@ function postsolve(model::PresolverModel,
     z_full = copy(unsafe_wrap(Array, sol_data.z, sol_data.dim_x))
 
     return x_full, y_full, z_full
+end
+
+function postsolve(
+    model::RemotePresolverModel,
+    x_red::Vector{Float64},
+    y_red::Vector{Float64},
+    z_red::Vector{Float64},
+)
+    !model.active && error("Remote PSLP worker has already been released.")
+    try
+        return remotecall_fetch(model.worker_id, x_red, y_red, z_red) do x_red, y_red, z_red
+            HPRLP.PSLP._remote_postsolve(x_red, y_red, z_red)
+        end
+    catch err
+        @warn "PSLP isolated worker failed during postsolve." exception=(err, catch_backtrace())
+        rethrow()
+    end
 end
 
 end # module
