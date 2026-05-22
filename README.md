@@ -1,3 +1,9 @@
+> **v0.1.7 upgrade note:** This release adds a new package dependency. After pulling `v0.1.7`, run:
+```bash
+rm Manifest.toml
+julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.build(); Pkg.precompile()'
+```
+
 # HPR-LP: A GPU Solver for Linear Programming
 
 [![Documentation](https://img.shields.io/badge/docs-stable-blue.svg)](https://polyu-ior.github.io/HPR-LP/)
