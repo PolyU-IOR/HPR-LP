@@ -42,7 +42,7 @@ jobs:
           HPRLP_DOCS_CANONICAL: https://PolyU-IOR.github.io/HPR-LP/dev/
         run: julia --project=docs docs/make.jl
       - name: Build stable docs
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'master')
         run: |
           set -euo pipefail
           latest_tag=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
@@ -64,7 +64,7 @@ jobs:
           git worktree remove --force "$stable_worktree"
           trap - EXIT
       - name: Prepare Pages root
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'master')
         run: |
           cat > docs/site/index.html <<'HTML'
           <!doctype html>
@@ -89,16 +89,16 @@ jobs:
           var DOCUMENTER_STABLE = "stable";
           JS
       - name: Configure Pages
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'master')
         uses: actions/configure-pages@v5
       - name: Upload Pages artifact
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'master')
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/site
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'master')
     needs: build
     runs-on: ubuntu-latest
     environment:
