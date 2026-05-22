@@ -13,7 +13,7 @@ Current GPU scope:
 using CUDA.CUSPARSE: CuSparseMatrixCSR
 
 const _DOUBLETONEQ_MAX_RATIO_PIVOT = 1e3
-const _DOUBLETONEQ_MAX_FILL_IN_PROXY = 3
+const _DOUBLETONEQ_MAX_FILL_IN_PROXY = 10
 const _DOUBLETONEQ_DIRECT_CSR_MAX_ENTRIES = 4096
 
 @inline function _is_integral_ratio_doubleton_eq(num::Float64, den::Float64, tol::Float64)
@@ -168,6 +168,131 @@ end
     end
     fill_in += elim_stop - kk + Int32(1)
     return fill_in
+end
+
+@inline function _doubleton_eq_next_live_col_row(
+    row_ptr,
+    col_val,
+    nz_val,
+    keep_row,
+    zero_tol,
+    col,
+    pos,
+)
+    stop = @inbounds row_ptr[col + Int32(1)] - Int32(1)
+    while pos <= stop
+        row = @inbounds col_val[pos]
+        val = @inbounds nz_val[pos]
+        if keep_row[row] != UInt8(0) && abs(val) > zero_tol
+            return row, pos
+        end
+        pos += Int32(1)
+    end
+    return Int32(typemax(Int32)), pos
+end
+
+@inline function _doubleton_eq_fill_in_proxy_device_live(
+    row_ptr,
+    col_val,
+    nz_val,
+    keep_row,
+    zero_tol,
+    keep_col,
+    elim_col,
+)
+    fill_in = Int32(-1)
+    keep_start = @inbounds row_ptr[keep_col]
+    keep_stop = @inbounds row_ptr[keep_col + Int32(1)] - Int32(1)
+    elim_start = @inbounds row_ptr[elim_col]
+    elim_stop = @inbounds row_ptr[elim_col + Int32(1)] - Int32(1)
+    if keep_stop < keep_start || elim_stop < elim_start
+        return fill_in
+    end
+
+    jj = keep_start
+    kk = elim_start
+    while jj <= keep_stop && kk <= elim_stop
+        keep_row_j, jj_live = _doubleton_eq_next_live_col_row(
+            row_ptr,
+            col_val,
+            nz_val,
+            keep_row,
+            zero_tol,
+            keep_col,
+            jj,
+        )
+        elim_row_k, kk_live = _doubleton_eq_next_live_col_row(
+            row_ptr,
+            col_val,
+            nz_val,
+            keep_row,
+            zero_tol,
+            elim_col,
+            kk,
+        )
+        if keep_row_j == Int32(typemax(Int32)) || elim_row_k == Int32(typemax(Int32))
+            break
+        end
+        if keep_row_j == elim_row_k
+            jj = jj_live + Int32(1)
+            kk = kk_live + Int32(1)
+        elseif elim_row_k < keep_row_j
+            kk = kk_live + Int32(1)
+            fill_in += Int32(1)
+        else
+            jj = jj_live + Int32(1)
+        end
+    end
+
+    while kk <= elim_stop
+        elim_row_k, kk_live = _doubleton_eq_next_live_col_row(
+            row_ptr,
+            col_val,
+            nz_val,
+            keep_row,
+            zero_tol,
+            elim_col,
+            kk,
+        )
+        elim_row_k == Int32(typemax(Int32)) && break
+        fill_in += Int32(1)
+        kk = kk_live + Int32(1)
+    end
+    return fill_in
+end
+
+function _kernel_doubleton_eq_live_col_nnz!(
+    col_nnz,
+    AT_row_ptr,
+    AT_col_val,
+    AT_nz_val,
+    keep_row,
+    keep_col,
+    zero_tol,
+    n,
+)
+    col = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if col <= n
+        if @inbounds(keep_col[col] == UInt8(0))
+            @inbounds col_nnz[col] = Int32(0)
+            return
+        end
+
+        count = Int32(0)
+        @inbounds start_idx = AT_row_ptr[col]
+        @inbounds stop_idx = AT_row_ptr[col + Int32(1)] - Int32(1)
+        if start_idx <= stop_idx
+            for p in start_idx:stop_idx
+                @inbounds row = AT_col_val[p]
+                @inbounds a = AT_nz_val[p]
+                if keep_row[row] != UInt8(0) && abs(a) > zero_tol
+                    count += Int32(1)
+                end
+            end
+        end
+        @inbounds col_nnz[col] = count
+    end
+    return
 end
 
 function _kernel_doubleton_eq_candidates!(
@@ -458,14 +583,17 @@ end
 
 function _kernel_mark_doubleton_eq_batch_acceptable!(
     acceptable_mask,
-    col_owner,
     candidate_mask,
     candidate_keep_col,
     candidate_elim_col,
     col_nnz,
     AT_row_ptr,
     AT_col_val,
+    AT_nz_val,
+    keep_row,
+    zero_tol,
     max_fill_in_proxy,
+    reject_counts,
     m,
 )
     i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -475,16 +603,90 @@ function _kernel_mark_doubleton_eq_batch_acceptable!(
         keep_nnz = @inbounds col_nnz[keep_col]
         elim_nnz = @inbounds col_nnz[elim_col]
         if elim_nnz > keep_nnz + max_fill_in_proxy + Int32(1)
+            @inbounds CUDA.@atomic reject_counts[1] += Int32(1)
             return
         end
-        fill_in = _doubleton_eq_fill_in_proxy_device(
+        fill_in = _doubleton_eq_fill_in_proxy_device_live(
             AT_row_ptr,
             AT_col_val,
+            AT_nz_val,
+            keep_row,
+            zero_tol,
             keep_col,
             elim_col,
         )
         if fill_in <= max_fill_in_proxy
             @inbounds acceptable_mask[i] = UInt8(1)
+            @inbounds CUDA.@atomic reject_counts[3] += Int32(1)
+        else
+            @inbounds CUDA.@atomic reject_counts[2] += Int32(1)
+        end
+    end
+    return
+end
+
+function _kernel_score_doubleton_eq_batch_candidates!(
+    screened_mask,
+    candidate_score,
+    candidate_mask,
+    candidate_keep_col,
+    candidate_elim_col,
+    col_nnz,
+    AT_row_ptr,
+    AT_col_val,
+    AT_nz_val,
+    keep_row,
+    zero_tol,
+    hard_fill_cap,
+    reject_counts,
+    m,
+)
+    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if i <= m && @inbounds(candidate_mask[i] != UInt8(0))
+        keep_col = @inbounds candidate_keep_col[i]
+        elim_col = @inbounds candidate_elim_col[i]
+        keep_nnz = @inbounds col_nnz[keep_col]
+        elim_nnz = @inbounds col_nnz[elim_col]
+        if elim_nnz > keep_nnz + hard_fill_cap + Int32(1)
+            @inbounds CUDA.@atomic reject_counts[1] += Int32(1)
+            return
+        end
+
+        fill_in = _doubleton_eq_fill_in_proxy_device_live(
+            AT_row_ptr,
+            AT_col_val,
+            AT_nz_val,
+            keep_row,
+            zero_tol,
+            keep_col,
+            elim_col,
+        )
+        if fill_in > hard_fill_cap
+            @inbounds CUDA.@atomic reject_counts[2] += Int32(1)
+            return
+        end
+
+        imbalance = max(elim_nnz - keep_nnz - Int32(1), Int32(0))
+        @inbounds candidate_score[i] = fill_in + imbalance
+        @inbounds screened_mask[i] = UInt8(1)
+        @inbounds CUDA.@atomic reject_counts[3] += Int32(1)
+    end
+    return
+end
+
+function _kernel_claim_doubleton_eq_batch_columns!(
+    col_owner,
+    active_mask,
+    blocked_col,
+    candidate_keep_col,
+    candidate_elim_col,
+    m,
+)
+    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if i <= m && @inbounds(active_mask[i] != UInt8(0))
+        keep_col = @inbounds candidate_keep_col[i]
+        elim_col = @inbounds candidate_elim_col[i]
+        if @inbounds(blocked_col[keep_col] == UInt8(0) && blocked_col[elim_col] == UInt8(0))
             CUDA.@atomic col_owner[keep_col] = min(col_owner[keep_col], Int32(i))
             CUDA.@atomic col_owner[elim_col] = min(col_owner[elim_col], Int32(i))
         end
@@ -494,18 +696,27 @@ end
 
 function _kernel_select_doubleton_eq_batch_rows!(
     selected_mask,
-    acceptable_mask,
+    active_mask,
+    blocked_col,
     candidate_keep_col,
     candidate_elim_col,
     col_owner,
     m,
 )
     i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if i <= m && @inbounds(acceptable_mask[i] != UInt8(0))
+    if i <= m && @inbounds(active_mask[i] != UInt8(0))
         keep_col = @inbounds candidate_keep_col[i]
         elim_col = @inbounds candidate_elim_col[i]
-        if @inbounds(col_owner[keep_col] == Int32(i) && col_owner[elim_col] == Int32(i))
+        if @inbounds(
+            blocked_col[keep_col] == UInt8(0) &&
+            blocked_col[elim_col] == UInt8(0) &&
+            col_owner[keep_col] == Int32(i) &&
+            col_owner[elim_col] == Int32(i)
+        )
             @inbounds selected_mask[i] = UInt8(1)
+            @inbounds active_mask[i] = UInt8(0)
+            @inbounds blocked_col[keep_col] = UInt8(1)
+            @inbounds blocked_col[elim_col] = UInt8(1)
         end
     end
     return
@@ -638,6 +849,7 @@ function _kernel_doubleton_eq_subst_entry_counts!(
     AT_row_ptr,
     AT_col_val,
     AT_nz_val,
+    keep_row,
     zero_tol,
     k,
 )
@@ -652,7 +864,7 @@ function _kernel_doubleton_eq_subst_entry_counts!(
             for p in start_idx:stop_idx
                 @inbounds row = AT_col_val[p]
                 @inbounds a = AT_nz_val[p]
-                if row != target_row && abs(a) > zero_tol
+                if row != target_row && keep_row[row] != UInt8(0) && abs(a) > zero_tol
                     count += Int32(1)
                 end
             end
@@ -676,6 +888,7 @@ function _kernel_build_doubleton_eq_subst_entries!(
     AT_row_ptr,
     AT_col_val,
     AT_nz_val,
+    keep_row,
     zero_tol,
     k,
 )
@@ -694,7 +907,7 @@ function _kernel_build_doubleton_eq_subst_entries!(
             for p in start_idx:stop_idx
                 @inbounds row = AT_col_val[p]
                 @inbounds a = AT_nz_val[p]
-                if row != target_row && abs(a) > zero_tol
+                if row != target_row && keep_row[row] != UInt8(0) && abs(a) > zero_tol
                     @inbounds delta_rows[write_pos] = row
                     @inbounds delta_cols[write_pos] = keep
                     @inbounds delta_vals[write_pos] = alpha_t * a
@@ -995,235 +1208,149 @@ function _apply_rule_doubleton_eq_batch!(
     stats::PresolveStats_gpu,
     pparams::PresolveParams,
 )
-    m = length(plan.keep_row_mask)
-    n = length(plan.keep_col_mask)
-    A_source = isnothing(plan.new_A) ? lp.A : plan.new_A
-    profile_batch = pparams.verbose
-
-    candidate_mask = CUDA.zeros(UInt8, m)
-    candidate_elim_col = CUDA.fill(Int32(0), m)
-    candidate_elim_val = CUDA.zeros(Float64, m)
-    candidate_keep_col = CUDA.fill(Int32(0), m)
-    candidate_keep_val = CUDA.zeros(Float64, m)
-    ratio_tol = max(1e-9, pparams.bound_tol)
-    blocks_rows = cld(m, GPU_PRESOLVE_THREADS)
-
-    t_stage = time()
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_doubleton_eq_candidates!(
-        candidate_mask,
-        candidate_elim_col,
-        candidate_elim_val,
-        candidate_keep_col,
-        candidate_keep_val,
-        A_source.rowPtr,
-        A_source.colVal,
-        A_source.nzVal,
-        plan.keep_row_mask,
-        plan.keep_col_mask,
-        stats.col_nnz,
-        plan.new_AL,
-        plan.new_AU,
-        pparams.zero_tol,
-        pparams.bound_tol,
-        ratio_tol,
-        Int32(m),
-    )
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] candidates = ", round(time() - t_stage; digits=4), "s")
-    end
-
-    acceptable_mask = CUDA.zeros(UInt8, m)
-    col_owner = CUDA.fill(typemax(Int32), n)
-    t_stage = time()
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_mark_doubleton_eq_batch_acceptable!(
-        acceptable_mask,
-        col_owner,
-        candidate_mask,
-        candidate_keep_col,
-        candidate_elim_col,
-        stats.col_nnz,
-        lp.AT.rowPtr,
-        lp.AT.colVal,
-        Int32(_DOUBLETONEQ_MAX_FILL_IN_PROXY),
-        Int32(m),
-    )
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] acceptable = ", round(time() - t_stage; digits=4), "s")
-    end
-
-    selected_mask = CUDA.zeros(UInt8, m)
-    t_stage = time()
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_select_doubleton_eq_batch_rows!(
-        selected_mask,
-        acceptable_mask,
-        candidate_keep_col,
-        candidate_elim_col,
-        col_owner,
-        Int32(m),
-    )
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] select = ", round(time() - t_stage; digits=4), "s")
-    end
-
-    t_stage = time()
-    _, selected_rows, selected_count = build_maps_from_mask(selected_mask)
-    Int(selected_count) == 0 && return nothing
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] compact selected = ", round(time() - t_stage; digits=4), "s (k=", Int(selected_count), ")")
-    end
-
-    k = Int(selected_count)
-    selected_keep_col = CuVector{Int32}(undef, k)
-    selected_elim_col = CuVector{Int32}(undef, k)
-    selected_keep_val = CuVector{Float64}(undef, k)
-    selected_elim_val = CuVector{Float64}(undef, k)
-    selected_rhs = CuVector{Float64}(undef, k)
-    selected_old_elim_l = CuVector{Float64}(undef, k)
-    selected_old_elim_u = CuVector{Float64}(undef, k)
-    selected_elim_obj = CuVector{Float64}(undef, k)
-    selected_old_keep_l = CuVector{Float64}(undef, k)
-    selected_old_keep_u = CuVector{Float64}(undef, k)
-    blocks_sel = cld(k, GPU_PRESOLVE_THREADS)
-    t_stage = time()
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_sel _kernel_pack_doubleton_eq_selected_metadata!(
-        selected_keep_col,
-        selected_elim_col,
-        selected_keep_val,
-        selected_elim_val,
-        selected_rhs,
-        selected_old_elim_l,
-        selected_old_elim_u,
-        selected_elim_obj,
-        selected_old_keep_l,
-        selected_old_keep_u,
-        selected_rows,
-        candidate_keep_col,
-        candidate_elim_col,
-        candidate_keep_val,
-        candidate_elim_val,
-        plan.new_AU,
-        plan.new_l,
-        plan.new_u,
-        plan.new_c,
-        Int32(k),
-    )
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] pack selected = ", round(time() - t_stage; digits=4), "s")
-    end
-
-    keep_l_new = CUDA.zeros(Float64, k)
-    keep_u_new = CUDA.zeros(Float64, k)
-    alpha = CUDA.zeros(Float64, k)
-    beta = CUDA.zeros(Float64, k)
-    fixed_at = CUDA.zeros(Float64, k)
-    keep_fixed_mask = CUDA.zeros(UInt8, k)
-    infeas_flag = CUDA.zeros(Int32, 1)
-    infeas_row_ref = CUDA.fill(Int32(m + 1), 1)
-
-    t_stage = time()
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_sel _kernel_doubleton_eq_batch_bound_transfer!(
-        infeas_flag,
-        infeas_row_ref,
-        keep_l_new,
-        keep_u_new,
-        alpha,
-        beta,
-        fixed_at,
-        keep_fixed_mask,
-        selected_rows,
-        selected_keep_val,
-        selected_elim_val,
-        selected_rhs,
-        selected_old_elim_l,
-        selected_old_elim_u,
-        selected_old_keep_l,
-        selected_old_keep_u,
-        pparams.bound_tol,
-        Int32(k),
-    )
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] bound transfer = ", round(time() - t_stage; digits=4), "s")
-    end
-
-    if Int(_copy_scalar_to_host(infeas_flag, 1)) != 0
-        bad_row = Int(_copy_scalar_to_host(infeas_row_ref, 1))
-        plan.has_infeasible = true
-        plan.status_message = "Doubleton-equality infeasibility at row $(bad_row): transferred bounds made l > u."
+    if plan.has_infeasible || plan.has_unbounded
         return nothing
     end
 
-    fixed_col_mask = CUDA.zeros(UInt8, n)
-    fixed_val = CUDA.zeros(Float64, n)
-    row_delete = CUDA.zeros(UInt8, m)
-    col_delete = CUDA.zeros(UInt8, n)
-
-    t_stage = time()
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_sel _kernel_apply_doubleton_eq_batch_decisions!(
-        plan.new_l,
-        plan.new_u,
-        plan.new_c,
-        fixed_col_mask,
-        fixed_val,
-        row_delete,
-        col_delete,
-        selected_rows,
-        selected_keep_col,
-        selected_elim_col,
-        keep_l_new,
-        keep_u_new,
-        alpha,
-        selected_elim_obj,
-        keep_fixed_mask,
-        fixed_at,
-        Int32(k),
-    )
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] apply decisions = ", round(time() - t_stage; digits=4), "s")
+    m = length(plan.keep_row_mask)
+    n = length(plan.keep_col_mask)
+    if m == 0 || n == 0
+        return nothing
     end
 
-    t_stage = time()
-    _, subst_pair_idx, subst_count = build_maps_from_mask(UInt8.(keep_fixed_mask .== UInt8(0)))
-    _, fixed_pair_idx, fixed_pair_count = build_maps_from_mask(keep_fixed_mask)
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] split fixed/subst = ", round(time() - t_stage; digits=4), "s (subst=", Int(subst_count), ", fixed=", Int(fixed_pair_count), ")")
-    end
+    A_source = isnothing(plan.new_A) ? lp.A : plan.new_A
+    AT_source = isnothing(plan.new_A) ? lp.AT : transpose_csr(A_source)
+    col_nnz = copy(stats.col_nnz)
 
-    subst_rows = CuVector{Int32}(undef, Int(subst_count))
-    subst_keep_col = CuVector{Int32}(undef, Int(subst_count))
-    subst_elim_col = CuVector{Int32}(undef, Int(subst_count))
-    subst_keep_val = CuVector{Float64}(undef, Int(subst_count))
-    subst_elim_val = CuVector{Float64}(undef, Int(subst_count))
-    subst_rhs = CuVector{Float64}(undef, Int(subst_count))
-    subst_old_elim_l = CuVector{Float64}(undef, Int(subst_count))
-    subst_old_elim_u = CuVector{Float64}(undef, Int(subst_count))
-    subst_elim_obj = CuVector{Float64}(undef, Int(subst_count))
-    subst_alpha = CuVector{Float64}(undef, Int(subst_count))
-    subst_beta = CuVector{Float64}(undef, Int(subst_count))
-    if Int(subst_count) > 0
-        blocks_subst_meta = cld(Int(subst_count), GPU_PRESOLVE_THREADS)
-        t_stage = time()
-        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_subst_meta _kernel_pack_doubleton_eq_subst_metadata!(
-            subst_rows,
-            subst_keep_col,
-            subst_elim_col,
-            subst_keep_val,
-            subst_elim_val,
-            subst_rhs,
-            subst_old_elim_l,
-            subst_old_elim_u,
-            subst_elim_obj,
-            subst_alpha,
-            subst_beta,
-            subst_pair_idx,
-            selected_rows,
+    ratio_tol = max(1e-9, pparams.bound_tol)
+    blocks_rows = cld(m, GPU_PRESOLVE_THREADS)
+    blocks_cols = cld(n, GPU_PRESOLVE_THREADS)
+    selected_any = false
+
+    for _ in 1:max(1, pparams.doubleton_eq_batch_inner_rounds)
+        candidate_mask = CUDA.zeros(UInt8, m)
+        candidate_elim_col = CUDA.fill(Int32(0), m)
+        candidate_elim_val = CUDA.zeros(Float64, m)
+        candidate_keep_col = CUDA.fill(Int32(0), m)
+        candidate_keep_val = CUDA.zeros(Float64, m)
+        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_doubleton_eq_candidates!(
+            candidate_mask,
+            candidate_elim_col,
+            candidate_elim_val,
+            candidate_keep_col,
+            candidate_keep_val,
+            A_source.rowPtr,
+            A_source.colVal,
+            A_source.nzVal,
+            plan.keep_row_mask,
+            plan.keep_col_mask,
+            col_nnz,
+            plan.new_AL,
+            plan.new_AU,
+            pparams.zero_tol,
+            pparams.bound_tol,
+            ratio_tol,
+            Int32(m),
+        )
+
+        active_mask = CUDA.zeros(UInt8, m)
+        reject_counts = CUDA.zeros(Int32, 3)
+        if pparams.doubleton_eq_stage1_score
+            screened_mask = CUDA.zeros(UInt8, m)
+            candidate_score = CUDA.fill(Int32(typemax(Int32)), m)
+            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_score_doubleton_eq_batch_candidates!(
+                screened_mask,
+                candidate_score,
+                candidate_mask,
+                candidate_keep_col,
+                candidate_elim_col,
+                col_nnz,
+                AT_source.rowPtr,
+                AT_source.colVal,
+                AT_source.nzVal,
+                plan.keep_row_mask,
+                pparams.zero_tol,
+                Int32(max(pparams.doubleton_eq_stage1_hard_fill_cap, _DOUBLETONEQ_MAX_FILL_IN_PROXY)),
+                reject_counts,
+                Int32(m),
+            )
+
+            screened_mask_h = Array(screened_mask)
+            if !any(!iszero, screened_mask_h)
+                selected_any && break
+                return nothing
+            end
+
+            score_h = Array(candidate_score)
+            cutoff = minimum(score_h[screened_mask_h .!= UInt8(0)]) + max(pparams.doubleton_eq_stage1_score_band, 0)
+            active_mask .= UInt8.((screened_mask .!= UInt8(0)) .& (candidate_score .<= Int32(cutoff)))
+        else
+            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_mark_doubleton_eq_batch_acceptable!(
+                active_mask,
+                candidate_mask,
+                candidate_keep_col,
+                candidate_elim_col,
+                col_nnz,
+                AT_source.rowPtr,
+                AT_source.colVal,
+                AT_source.nzVal,
+                plan.keep_row_mask,
+                pparams.zero_tol,
+                Int32(_DOUBLETONEQ_MAX_FILL_IN_PROXY),
+                reject_counts,
+                Int32(m),
+            )
+        end
+
+        selected_mask = CUDA.zeros(UInt8, m)
+        blocked_col = CUDA.zeros(UInt8, n)
+        for _ in 1:max(1, pparams.doubleton_eq_batch_matching_rounds)
+            col_owner = CUDA.fill(typemax(Int32), n)
+            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_claim_doubleton_eq_batch_columns!(
+                col_owner,
+                active_mask,
+                blocked_col,
+                candidate_keep_col,
+                candidate_elim_col,
+                Int32(m),
+            )
+            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_select_doubleton_eq_batch_rows!(
+                selected_mask,
+                active_mask,
+                blocked_col,
+                candidate_keep_col,
+                candidate_elim_col,
+                col_owner,
+                Int32(m),
+            )
+            _, remaining_rows, remaining_count = build_maps_from_mask(active_mask)
+            Int(remaining_count) == 0 && break
+        end
+
+        _, selected_rows, selected_count = build_maps_from_mask(selected_mask)
+        if Int(selected_count) == 0
+            selected_any && break
+            return nothing
+        end
+        if Int(selected_count) <= pparams.doubleton_eq_min_selected_batch
+            selected_any && break
+            return nothing
+        end
+
+        selected_any = true
+        k = Int(selected_count)
+        selected_keep_col = CuVector{Int32}(undef, k)
+        selected_elim_col = CuVector{Int32}(undef, k)
+        selected_keep_val = CuVector{Float64}(undef, k)
+        selected_elim_val = CuVector{Float64}(undef, k)
+        selected_rhs = CuVector{Float64}(undef, k)
+        selected_old_elim_l = CuVector{Float64}(undef, k)
+        selected_old_elim_u = CuVector{Float64}(undef, k)
+        selected_elim_obj = CuVector{Float64}(undef, k)
+        selected_old_keep_l = CuVector{Float64}(undef, k)
+        selected_old_keep_u = CuVector{Float64}(undef, k)
+        blocks_sel = cld(k, GPU_PRESOLVE_THREADS)
+        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_sel _kernel_pack_doubleton_eq_selected_metadata!(
             selected_keep_col,
             selected_elim_col,
             selected_keep_val,
@@ -1232,179 +1359,278 @@ function _apply_rule_doubleton_eq_batch!(
             selected_old_elim_l,
             selected_old_elim_u,
             selected_elim_obj,
+            selected_old_keep_l,
+            selected_old_keep_u,
+            selected_rows,
+            candidate_keep_col,
+            candidate_elim_col,
+            candidate_keep_val,
+            candidate_elim_val,
+            plan.new_AU,
+            plan.new_l,
+            plan.new_u,
+            plan.new_c,
+            Int32(k),
+        )
+
+        keep_l_new = CUDA.zeros(Float64, k)
+        keep_u_new = CUDA.zeros(Float64, k)
+        alpha = CUDA.zeros(Float64, k)
+        beta = CUDA.zeros(Float64, k)
+        fixed_at = CUDA.zeros(Float64, k)
+        keep_fixed_mask = CUDA.zeros(UInt8, k)
+        infeas_flag = CUDA.zeros(Int32, 1)
+        infeas_row_ref = CUDA.fill(Int32(m + 1), 1)
+        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_sel _kernel_doubleton_eq_batch_bound_transfer!(
+            infeas_flag,
+            infeas_row_ref,
+            keep_l_new,
+            keep_u_new,
             alpha,
             beta,
-            Int32(subst_count),
-        )
-        if profile_batch
-            CUDA.synchronize()
-            println(">>> [doubleton_eq batch] pack subst = ", round(time() - t_stage; digits=4), "s")
-        end
-    end
-    fixed_keep_col = CuVector{Int32}(undef, Int(fixed_pair_count))
-    fixed_keep_val = CuVector{Float64}(undef, Int(fixed_pair_count))
-    if Int(fixed_pair_count) > 0
-        blocks_fixed_meta = cld(Int(fixed_pair_count), GPU_PRESOLVE_THREADS)
-        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_fixed_meta _kernel_pack_doubleton_eq_fixed_metadata!(
-            fixed_keep_col,
-            fixed_keep_val,
-            fixed_pair_idx,
-            selected_keep_col,
             fixed_at,
-            Int32(fixed_pair_count),
+            keep_fixed_mask,
+            selected_rows,
+            selected_keep_val,
+            selected_elim_val,
+            selected_rhs,
+            selected_old_elim_l,
+            selected_old_elim_u,
+            selected_old_keep_l,
+            selected_old_keep_u,
+            pparams.bound_tol,
+            Int32(k),
         )
-    end
 
-    keep_row_new = UInt8.((plan.keep_row_mask .!= UInt8(0)) .& (row_delete .== UInt8(0)))
-    keep_col_new = UInt8.((plan.keep_col_mask .!= UInt8(0)) .& (fixed_col_mask .== UInt8(0)) .& (col_delete .== UInt8(0)))
-
-    row_shift = CUDA.zeros(Float64, m)
-    A_new = A_source
-    if Int(subst_count) > 0
-        subst_k = Int(subst_count)
-        t_stage = time()
-        entry_counts = max.(gather_by_red2org(stats.col_nnz, subst_elim_col) .- Int32(1), Int32(0))
-        blocks_subst = cld(subst_k, GPU_PRESOLVE_THREADS)
-        entry_prefix = cumsum(entry_counts)
-        total_entries = subst_k == 0 ? 0 : Int(_copy_scalar_to_host(entry_prefix, subst_k))
-        if profile_batch
-            CUDA.synchronize()
-            println(">>> [doubleton_eq batch] entry counts = ", round(time() - t_stage; digits=4), "s (nnz=", total_entries, ")")
+        if Int(_copy_scalar_to_host(infeas_flag, 1)) != 0
+            bad_row = Int(_copy_scalar_to_host(infeas_row_ref, 1))
+            plan.has_infeasible = true
+            plan.status_message = "Doubleton-equality infeasibility at row $(bad_row): transferred bounds made l > u."
+            return nothing
         end
-        if total_entries > 0
-            entry_starts = CUDA.fill(Int32(1), subst_k)
-            if subst_k > 1
-                entry_starts[2:end] .= entry_prefix[1:(end - 1)] .+ Int32(1)
-            end
 
-            delta_rows = CuVector{Int32}(undef, total_entries)
-            delta_cols = CuVector{Int32}(undef, total_entries)
-            delta_vals = CuVector{Float64}(undef, total_entries)
-            t_stage = time()
-            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_subst _kernel_build_doubleton_eq_subst_entries!(
-                delta_rows,
-                delta_cols,
-                delta_vals,
-                row_shift,
-                entry_starts,
+        fixed_col_mask = CUDA.zeros(UInt8, n)
+        fixed_val = CUDA.zeros(Float64, n)
+        row_delete = CUDA.zeros(UInt8, m)
+        col_delete = CUDA.zeros(UInt8, n)
+        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_sel _kernel_apply_doubleton_eq_batch_decisions!(
+            plan.new_l,
+            plan.new_u,
+            plan.new_c,
+            fixed_col_mask,
+            fixed_val,
+            row_delete,
+            col_delete,
+            selected_rows,
+            selected_keep_col,
+            selected_elim_col,
+            keep_l_new,
+            keep_u_new,
+            alpha,
+            selected_elim_obj,
+            keep_fixed_mask,
+            fixed_at,
+            Int32(k),
+        )
+
+        _, subst_pair_idx, subst_count = build_maps_from_mask(UInt8.(keep_fixed_mask .== UInt8(0)))
+        _, fixed_pair_idx, fixed_pair_count = build_maps_from_mask(keep_fixed_mask)
+
+        subst_rows = CuVector{Int32}(undef, Int(subst_count))
+        subst_keep_col = CuVector{Int32}(undef, Int(subst_count))
+        subst_elim_col = CuVector{Int32}(undef, Int(subst_count))
+        subst_keep_val = CuVector{Float64}(undef, Int(subst_count))
+        subst_elim_val = CuVector{Float64}(undef, Int(subst_count))
+        subst_rhs = CuVector{Float64}(undef, Int(subst_count))
+        subst_old_elim_l = CuVector{Float64}(undef, Int(subst_count))
+        subst_old_elim_u = CuVector{Float64}(undef, Int(subst_count))
+        subst_elim_obj = CuVector{Float64}(undef, Int(subst_count))
+        subst_alpha = CuVector{Float64}(undef, Int(subst_count))
+        subst_beta = CuVector{Float64}(undef, Int(subst_count))
+        if Int(subst_count) > 0
+            blocks_subst_meta = cld(Int(subst_count), GPU_PRESOLVE_THREADS)
+            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_subst_meta _kernel_pack_doubleton_eq_subst_metadata!(
                 subst_rows,
                 subst_keep_col,
                 subst_elim_col,
+                subst_keep_val,
+                subst_elim_val,
+                subst_rhs,
+                subst_old_elim_l,
+                subst_old_elim_u,
+                subst_elim_obj,
                 subst_alpha,
                 subst_beta,
-                lp.AT.rowPtr,
-                lp.AT.colVal,
-                lp.AT.nzVal,
+                subst_pair_idx,
+                selected_rows,
+                selected_keep_col,
+                selected_elim_col,
+                selected_keep_val,
+                selected_elim_val,
+                selected_rhs,
+                selected_old_elim_l,
+                selected_old_elim_u,
+                selected_elim_obj,
+                alpha,
+                beta,
+                Int32(subst_count),
+            )
+        end
+
+        fixed_keep_col = CuVector{Int32}(undef, Int(fixed_pair_count))
+        fixed_keep_val = CuVector{Float64}(undef, Int(fixed_pair_count))
+        if Int(fixed_pair_count) > 0
+            blocks_fixed_meta = cld(Int(fixed_pair_count), GPU_PRESOLVE_THREADS)
+            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_fixed_meta _kernel_pack_doubleton_eq_fixed_metadata!(
+                fixed_keep_col,
+                fixed_keep_val,
+                fixed_pair_idx,
+                selected_keep_col,
+                fixed_at,
+                Int32(fixed_pair_count),
+            )
+        end
+
+        keep_row_new = UInt8.((plan.keep_row_mask .!= UInt8(0)) .& (row_delete .== UInt8(0)))
+        keep_col_new = UInt8.((plan.keep_col_mask .!= UInt8(0)) .& (fixed_col_mask .== UInt8(0)) .& (col_delete .== UInt8(0)))
+
+        row_shift = CUDA.zeros(Float64, m)
+        A_new = A_source
+        matrix_changed = false
+        if Int(subst_count) > 0
+            subst_support_counts = CuVector{Int32}(undef, Int(subst_count))
+            subst_k = Int(subst_count)
+            blocks_subst = cld(subst_k, GPU_PRESOLVE_THREADS)
+            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_subst _kernel_doubleton_eq_subst_entry_counts!(
+                subst_support_counts,
+                subst_rows,
+                subst_elim_col,
+                AT_source.rowPtr,
+                AT_source.colVal,
+                AT_source.nzVal,
+                keep_row_new,
                 pparams.zero_tol,
                 Int32(subst_k),
             )
-            if profile_batch
-                CUDA.synchronize()
-                println(">>> [doubleton_eq batch] build delta = ", round(time() - t_stage; digits=4), "s")
-            end
+            entry_prefix = cumsum(subst_support_counts)
+            total_entries = subst_k == 0 ? 0 : Int(_copy_scalar_to_host(entry_prefix, subst_k))
+            if total_entries > 0
+                entry_starts = CUDA.fill(Int32(1), subst_k)
+                if subst_k > 1
+                    entry_starts[2:end] .= entry_prefix[1:(end - 1)] .+ Int32(1)
+                end
 
-            t_stage = time()
-            delta_csr = if total_entries <= _DOUBLETONEQ_DIRECT_CSR_MAX_ENTRIES
-                _build_doubleton_eq_delta_csr(
+                delta_rows = CuVector{Int32}(undef, total_entries)
+                delta_cols = CuVector{Int32}(undef, total_entries)
+                delta_vals = CuVector{Float64}(undef, total_entries)
+                @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_subst _kernel_build_doubleton_eq_subst_entries!(
                     delta_rows,
                     delta_cols,
                     delta_vals,
-                    size(A_source),
+                    row_shift,
+                    entry_starts,
+                    subst_rows,
+                    subst_keep_col,
+                    subst_elim_col,
+                    subst_alpha,
+                    subst_beta,
+                    AT_source.rowPtr,
+                    AT_source.colVal,
+                    AT_source.nzVal,
+                    keep_row_new,
+                    pparams.zero_tol,
+                    Int32(subst_k),
                 )
-            else
                 delta_coo = CUDA.CUSPARSE.CuSparseMatrixCOO(delta_rows, delta_cols, delta_vals, size(A_source))
-                CuSparseMatrixCSR(delta_coo)
-            end
-            if profile_batch
-                CUDA.synchronize()
-                println(">>> [doubleton_eq batch] delta csr = ", round(time() - t_stage; digits=4), "s")
-            end
-            t_stage = time()
-            A_new = A_source + delta_csr
-            if profile_batch
-                CUDA.synchronize()
-                println(">>> [doubleton_eq batch] sparse add = ", round(time() - t_stage; digits=4), "s")
+                delta_csr = CuSparseMatrixCSR(delta_coo)
+                A_new = A_source + delta_csr
+                matrix_changed = true
             end
         end
-    end
 
-    if Int(fixed_pair_count) > 0
-        fixed_k = Int(fixed_pair_count)
-        blocks_fixed = cld(fixed_k, GPU_PRESOLVE_THREADS)
-        t_stage = time()
-        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_fixed _kernel_accumulate_doubleton_eq_fixed_row_shift!(
-            row_shift,
-            fixed_keep_col,
-            fixed_keep_val,
-            keep_row_new,
-            lp.AT.rowPtr,
-            lp.AT.colVal,
-            lp.AT.nzVal,
+        if Int(fixed_pair_count) > 0
+            fixed_k = Int(fixed_pair_count)
+            blocks_fixed = cld(fixed_k, GPU_PRESOLVE_THREADS)
+            @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_fixed _kernel_accumulate_doubleton_eq_fixed_row_shift!(
+                row_shift,
+                fixed_keep_col,
+                fixed_keep_val,
+                keep_row_new,
+                AT_source.rowPtr,
+                AT_source.colVal,
+                AT_source.nzVal,
+                pparams.zero_tol,
+                Int32(fixed_k),
+            )
+        end
+
+        plan.new_AL .-= row_shift
+        plan.new_AU .-= row_shift
+
+        if Int(fixed_pair_count) > 0
+            append_fixed_col_postsolve_records!(
+                plan,
+                lp,
+                pparams,
+                fixed_col_mask,
+                fixed_val,
+                plan.new_c,
+                keep_row_new,
+            )
+            append_plan_fixed_from_mask!(plan, fixed_col_mask, fixed_val)
+            plan.obj_constant_delta += _stable_presolve_masked_product_sum(plan.new_c, fixed_val, fixed_col_mask)
+        end
+
+        if Int(subst_count) > 0
+            _append_doubleton_eq_batch_postsolve_records!(
+                plan,
+                pparams,
+                subst_elim_col,
+                subst_rows,
+                subst_keep_col,
+                subst_keep_val,
+                subst_elim_val,
+                subst_rhs,
+                subst_old_elim_l,
+                subst_old_elim_u,
+                subst_elim_obj,
+            )
+            plan.obj_constant_delta += _stable_presolve_objective_sum(subst_elim_obj .* subst_beta)
+            plan.new_A = A_new
+            plan.new_AT_leading_slack = nothing
+            plan.new_AT_slack_after = nothing
+            A_source = A_new
+        end
+
+        copyto!(plan.keep_row_mask, keep_row_new)
+        copyto!(plan.keep_col_mask, keep_col_new)
+        if Int(subst_count) > 0
+            plan.has_row_action = true
+        end
+        plan.has_col_action = true
+        plan.has_change = true
+
+        if matrix_changed
+            AT_source = transpose_csr(A_source)
+        end
+        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_cols _kernel_doubleton_eq_live_col_nnz!(
+            col_nnz,
+            AT_source.rowPtr,
+            AT_source.colVal,
+            AT_source.nzVal,
+            plan.keep_row_mask,
+            plan.keep_col_mask,
             pparams.zero_tol,
-            Int32(fixed_k),
+            Int32(n),
         )
-        if profile_batch
-            CUDA.synchronize()
-            println(">>> [doubleton_eq batch] fixed row shift = ", round(time() - t_stage; digits=4), "s")
-        end
     end
-
-    t_stage = time()
-    plan.new_AL .-= row_shift
-    plan.new_AU .-= row_shift
-    if profile_batch
-        CUDA.synchronize()
-        println(">>> [doubleton_eq batch] row bounds shift = ", round(time() - t_stage; digits=4), "s")
-    end
-
-    if Int(fixed_pair_count) > 0
-        append_fixed_col_postsolve_records!(
-            plan,
-            lp,
-            pparams,
-            fixed_col_mask,
-            fixed_val,
-            plan.new_c,
-            keep_row_new,
-        )
-        append_plan_fixed_from_mask!(plan, fixed_col_mask, fixed_val)
-        plan.obj_constant_delta += _stable_presolve_masked_product_sum(plan.new_c, fixed_val, fixed_col_mask)
-    end
-
-    if Int(subst_count) > 0
-        _append_doubleton_eq_batch_postsolve_records!(
-            plan,
-            pparams,
-            subst_elim_col,
-            subst_rows,
-            subst_keep_col,
-            subst_keep_val,
-            subst_elim_val,
-            subst_rhs,
-            subst_old_elim_l,
-            subst_old_elim_u,
-            subst_elim_obj,
-        )
-        plan.obj_constant_delta += _stable_presolve_objective_sum(subst_elim_obj .* subst_beta)
-    end
-
-    if Int(subst_count) > 0
-        plan.new_A = A_new
-        plan.new_AT_leading_slack = nothing
-        plan.new_AT_slack_after = nothing
-    end
-    copyto!(plan.keep_row_mask, keep_row_new)
-    copyto!(plan.keep_col_mask, keep_col_new)
-    if Int(subst_count) > 0
-        plan.has_row_action = true
-    end
-    plan.has_col_action = true
-    plan.has_change = true
     return nothing
 end
 
 """
-Rule: apply one exact doubleton-equality elimination per pass.
+Rule: apply doubleton equality elimination.
+
+This uses the current GPU batch implementation.
 """
 function apply_rule_doubleton_eq!(
     plan::PresolvePlan_gpu,
@@ -1416,264 +1642,6 @@ function apply_rule_doubleton_eq!(
         return nothing
     end
 
-    if pparams.doubleton_eq_single_batch_per_iter
-        return _apply_rule_doubleton_eq_batch!(plan, lp, stats, pparams)
-    end
-
-    m = length(plan.keep_row_mask)
-    n = length(plan.keep_col_mask)
-    if m == 0 || n == 0
-        return nothing
-    end
-
-    A_source = isnothing(plan.new_A) ? lp.A : plan.new_A
-
-    candidate_mask = CUDA.zeros(UInt8, m)
-    candidate_elim_col = CUDA.fill(Int32(0), m)
-    candidate_elim_val = CUDA.zeros(Float64, m)
-    candidate_keep_col = CUDA.fill(Int32(0), m)
-    candidate_keep_val = CUDA.zeros(Float64, m)
-    ratio_tol = max(1e-9, pparams.bound_tol)
-
-    blocks_rows = cld(m, GPU_PRESOLVE_THREADS)
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_doubleton_eq_candidates!(
-        candidate_mask,
-        candidate_elim_col,
-        candidate_elim_val,
-        candidate_keep_col,
-        candidate_keep_val,
-        A_source.rowPtr,
-        A_source.colVal,
-        A_source.nzVal,
-        plan.keep_row_mask,
-        plan.keep_col_mask,
-        stats.col_nnz,
-        plan.new_AL,
-        plan.new_AU,
-        pparams.zero_tol,
-        pparams.bound_tol,
-        ratio_tol,
-        Int32(m),
-    )
-
-    target_row_ref = CUDA.fill(Int32(m + 1), 1)
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_select_doubleton_eq_target_row!(
-        target_row_ref,
-        candidate_mask,
-        candidate_keep_col,
-        candidate_elim_col,
-        stats.col_nnz,
-        lp.AT.rowPtr,
-        lp.AT.colVal,
-        Int32(_DOUBLETONEQ_MAX_FILL_IN_PROXY),
-        Int32(m),
-    )
-    target_row = Int(_copy_scalar_to_host(target_row_ref, 1))
-    target_row > m && return nothing
-
-    target_i32 = CuVector{Int32}(undef, 3)
-    target_f64 = CuVector{Float64}(undef, 8)
-    @cuda threads=1 blocks=1 _kernel_pack_doubleton_eq_metadata!(
-        target_i32,
-        target_f64,
-        target_row_ref,
-        candidate_elim_col,
-        candidate_elim_val,
-        candidate_keep_col,
-        candidate_keep_val,
-        plan.new_AU,
-        plan.new_l,
-        plan.new_u,
-        plan.new_c,
-    )
-
-    target_row = Int(_copy_scalar_to_host(target_i32, 1))
-    elim_col = Int(_copy_scalar_to_host(target_i32, 2))
-    keep_col = Int(_copy_scalar_to_host(target_i32, 3))
-    elim_val = _copy_scalar_to_host(target_f64, 1)
-    keep_val = _copy_scalar_to_host(target_f64, 2)
-    rhs = _copy_scalar_to_host(target_f64, 3)
-    old_elim_l = _copy_scalar_to_host(target_f64, 4)
-    old_elim_u = _copy_scalar_to_host(target_f64, 5)
-    elim_obj = _copy_scalar_to_host(target_f64, 6)
-    old_keep_l = _copy_scalar_to_host(target_f64, 7)
-    old_keep_u = _copy_scalar_to_host(target_f64, 8)
-
-    mapped_l, mapped_u = _doubleton_eq_mapped_interval(
-        rhs,
-        keep_val,
-        elim_val,
-        old_elim_l,
-        old_elim_u,
-    )
-
-    keep_l_new = isfinite(mapped_l) ? max(old_keep_l, mapped_l) : old_keep_l
-    keep_u_new = isfinite(mapped_u) ? min(old_keep_u, mapped_u) : old_keep_u
-    if keep_l_new > keep_u_new + pparams.bound_tol
-        plan.has_infeasible = true
-        plan.status_message = "Doubleton-equality infeasibility at row $(target_row): transferred bounds made l > u."
-    end
-    plan.has_infeasible && return nothing
-
-    keep_fixed = isfinite(keep_l_new) && isfinite(keep_u_new) && keep_u_new <= keep_l_new + pparams.bound_tol
-
-    l_new = copy(plan.new_l)
-    u_new = copy(plan.new_u)
-    if isfinite(mapped_l)
-        l_new[keep_col:keep_col] .= keep_l_new
-    end
-    if isfinite(mapped_u)
-        u_new[keep_col:keep_col] .= keep_u_new
-    end
-
-    beta = rhs / elim_val
-    alpha = -keep_val / elim_val
-
-    c_new = copy(plan.new_c)
-    c_new[keep_col:keep_col] .+= elim_obj * alpha
-
-    if keep_fixed
-        fixed_at = 0.5 * (keep_l_new + keep_u_new)
-        l_new[keep_col:keep_col] .= fixed_at
-        u_new[keep_col:keep_col] .= fixed_at
-
-        fixed_mask = CUDA.zeros(UInt8, n)
-        fixed_val = CUDA.zeros(Float64, n)
-        fixed_mask[keep_col:keep_col] .= UInt8(1)
-        fixed_val[keep_col:keep_col] .= fixed_at
-
-        row_shift = CUDA.zeros(Float64, m)
-        blocks_cols = cld(n, GPU_PRESOLVE_THREADS)
-        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_cols _kernel_dual_fix_row_shift!(
-            row_shift,
-            fixed_mask,
-            CUDA.zeros(UInt8, n),
-            fixed_val,
-            plan.keep_row_mask,
-            lp.AT.rowPtr,
-            lp.AT.colVal,
-            lp.AT.nzVal,
-            Int32(n),
-        )
-
-        AL_new = copy(plan.new_AL)
-        AU_new = copy(plan.new_AU)
-        copyto!(AL_new, AL_new .- row_shift)
-        copyto!(AU_new, AU_new .- row_shift)
-
-        keep_col_new = copy(plan.keep_col_mask)
-        keep_col_new[keep_col:keep_col] .= UInt8(0)
-
-        append_fixed_col_postsolve_records!(
-            plan,
-            lp,
-            pparams,
-            fixed_mask,
-            fixed_val,
-            plan.new_c,
-            plan.keep_row_mask,
-        )
-
-        append_plan_fixed_from_mask!(plan, fixed_mask, fixed_val)
-        plan.obj_constant_delta += _stable_presolve_masked_product_sum(plan.new_c, fixed_val, fixed_mask)
-
-        copyto!(plan.keep_col_mask, keep_col_new)
-        copyto!(plan.new_l, l_new)
-        copyto!(plan.new_u, u_new)
-        copyto!(plan.new_AL, AL_new)
-        copyto!(plan.new_AU, AU_new)
-        plan.has_col_action = true
-        plan.has_change = true
-        return nothing
-    end
-
-    row_nnz_new = CUDA.zeros(Int32, m)
-    row_shift = CUDA.zeros(Float64, m)
-    @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_doubleton_eq_row_counts_and_shifts!(
-        row_nnz_new,
-        row_shift,
-        A_source.rowPtr,
-        A_source.colVal,
-        A_source.nzVal,
-        Int32(target_row),
-        Int32(keep_col),
-        Int32(elim_col),
-        alpha,
-        beta,
-        pparams.zero_tol,
-        Int32(m),
-    )
-
-    prefix = cumsum(row_nnz_new)
-    rowPtr_new = CUDA.fill(Int32(1), m + 1)
-    rowPtr_new[2:end] .= prefix .+ Int32(1)
-    nnz_new = m == 0 ? 0 : Int(_copy_scalar_to_host(prefix, m))
-    colVal_new = CuVector{Int32}(undef, nnz_new)
-    nzVal_new = CuVector{Float64}(undef, nnz_new)
-    if nnz_new > 0
-        @cuda threads=GPU_PRESOLVE_THREADS blocks=blocks_rows _kernel_copy_doubleton_eq_rows!(
-            colVal_new,
-            nzVal_new,
-            rowPtr_new,
-            A_source.rowPtr,
-            A_source.colVal,
-            A_source.nzVal,
-            Int32(target_row),
-            Int32(keep_col),
-            Int32(elim_col),
-            alpha,
-            pparams.zero_tol,
-            Int32(m),
-        )
-    end
-
-    A_new = CuSparseMatrixCSR(rowPtr_new, colVal_new, nzVal_new, size(A_source))
-    AL_new = copy(plan.new_AL)
-    AU_new = copy(plan.new_AU)
-    copyto!(AL_new, AL_new .- row_shift)
-    copyto!(AU_new, AU_new .- row_shift)
-
-    keep_row_new = copy(plan.keep_row_mask)
-    keep_col_new = copy(plan.keep_col_mask)
-    keep_row_new[target_row:target_row] .= UInt8(0)
-    keep_col_new[elim_col:elim_col] .= UInt8(0)
-
-    plan.new_A = A_new
-    plan.new_AT_leading_slack = nothing
-    plan.new_AT_slack_after = nothing
-    copyto!(plan.keep_row_mask, keep_row_new)
-    copyto!(plan.keep_col_mask, keep_col_new)
-    copyto!(plan.new_c, c_new)
-    copyto!(plan.new_l, l_new)
-    copyto!(plan.new_u, u_new)
-    copyto!(plan.new_AL, AL_new)
-    copyto!(plan.new_AU, AU_new)
-    if pparams.record_postsolve_tape
-        append_sub_col_record!(
-            plan.tape,
-            elim_col,
-            target_row,
-            Int32[keep_col],
-            elim_val,
-            rhs,
-            old_elim_l,
-            old_elim_u,
-            elim_obj,
-            true,
-            Float64[keep_val];
-            dual_mode=POSTSOLVE_DUAL_MINIMAL,
-        )
-        append_deleted_row_record!(
-            plan.tape,
-            target_row,
-            rhs,
-            rhs;
-            dual_mode=POSTSOLVE_DUAL_MINIMAL,
-        )
-    end
-    plan.obj_constant_delta += elim_obj * beta
-    plan.has_row_action = true
-    plan.has_col_action = true
-    plan.has_change = true
+    return _apply_rule_doubleton_eq_batch!(plan, lp, stats, pparams)
     return nothing
 end

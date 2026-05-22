@@ -557,11 +557,7 @@ function _run_phase_rule_sequence(
 
         repeat_to_exhaustion =
             phase == :col && (
-                rule_name == :singleton_cols ||
-                (
-                    rule_name == :doubleton_eq &&
-                    !pparams.doubleton_eq_single_batch_per_iter
-                )
+                rule_name == :singleton_cols
             )
 
         while true

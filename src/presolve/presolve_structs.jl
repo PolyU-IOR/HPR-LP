@@ -25,6 +25,12 @@ Base.@kwdef mutable struct PresolveParams
     primal_propagation_min_tighten_rel::Float64 = 1.0e-2
     doubleton_eq_max_shift::Int = 10
     doubleton_eq_single_batch_per_iter::Bool = false
+    doubleton_eq_stage1_score::Bool = true
+    doubleton_eq_stage1_score_band::Int = 8
+    doubleton_eq_stage1_hard_fill_cap::Int = 64
+    doubleton_eq_batch_matching_rounds::Int = 8
+    doubleton_eq_batch_inner_rounds::Int = 1024
+    doubleton_eq_min_selected_batch::Int = 0
 
     # Canonical rule switches.
     enable_close_bounds::Bool = true
@@ -37,7 +43,7 @@ Base.@kwdef mutable struct PresolveParams
     enable_singleton_cols::Bool = true
     enable_singleton_cols_eq::Bool = false
     enable_singleton_cols_dual_infer::Bool = false
-    enable_doubleton_eq::Bool = false
+    enable_doubleton_eq::Bool = true
     enable_dual_fix::Bool = true
     enable_parallel_cols::Bool = true
     enable_redundant_bounds::Bool = true
