@@ -235,8 +235,8 @@ function compute_original_kkt_metrics(
     dual_feas = norm(dual_residual) / norm_c
 
     p_lin = dot(model.c, xh)
-    delta_y = sum(((yb, al, au),) -> yb >= 0 ? yb * al : yb * au, zip(yh, ALh, AUh))
-    delta_z = sum(((zb, lb, ub),) -> zb >= 0 ? zb * lb : zb * ub, zip(zh, lh, uh))
+    delta_y = sum(((yb, al, au),) -> yb >= 0 ? yb * al : yb * au, zip(yh, ALh, AUh); init=0.0)
+    delta_z = sum(((zb, lb, ub),) -> zb >= 0 ? zb * lb : zb * ub, zip(zh, lh, uh); init=0.0)
     d_lin = delta_y + delta_z
 
     gap = abs(d_lin - p_lin) / (1.0 + abs(d_lin) + abs(p_lin))
@@ -770,6 +770,44 @@ function collect_results_cpu!(
     results.reduced_p_feas = residuals.err_Rp_org_bar
     results.reduced_d_feas = residuals.err_Rd_org_bar
     results.reduced_gap = residuals.rel_gap_bar
+    results.original_p_feas = NaN
+    results.original_d_feas = NaN
+    results.original_gap = NaN
+    return results
+end
+
+function collect_empty_model_results(
+    model::Union{LP_info_cpu,LP_info_gpu},
+)
+    m, n = size(model.A)
+    @assert m == 0 && n == 0
+
+    results = HPRLP_results()
+    results.x = Float64[]
+    results.y = Float64[]
+    results.z = Float64[]
+    results.iter = 0
+    results.iter_4 = 0
+    results.iter_6 = 0
+    results.iter_8 = 0
+    results.time = 0.0
+    results.time_4 = results.time
+    results.time_6 = results.time
+    results.time_8 = results.time
+    results.power_time = 0.0
+    results.primal_obj = model.obj_constant
+    results.residuals = 0.0
+    results.gap = 0.0
+    results.status = "OPTIMAL"
+    results.presolve_time = 0.0
+    results.postsolve_time = 0.0
+    results.original_nRows = 0
+    results.original_nCols = 0
+    results.presolved_nRows = 0
+    results.presolved_nCols = 0
+    results.reduced_p_feas = 0.0
+    results.reduced_d_feas = 0.0
+    results.reduced_gap = 0.0
     results.original_p_feas = NaN
     results.original_d_feas = NaN
     results.original_gap = NaN
@@ -1843,6 +1881,13 @@ result = solve(model, params)
 See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
 function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
+    if size(model.A, 1) == 0 && size(model.A, 2) == 0
+        if params.verbose
+            println("Reduced model is empty after presolve; treating it as solved without entering the main algorithm.")
+        end
+        return collect_empty_model_results(model)
+    end
+    
     # Setup: scaling
     scaling_info = setup_scaling(model, params)
     lp = model

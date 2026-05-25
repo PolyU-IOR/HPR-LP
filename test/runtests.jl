@@ -152,6 +152,37 @@ ENDATA
         end
     end
 
+    @testset "GPU Presolve Empty Reduced Model" begin
+        if HPRLP.CUDA.functional()
+            A = spzeros(0, 1)
+            AL = Float64[]
+            AU = Float64[]
+            c = [3.0]
+            l = [1.0]
+            u = [2.0]
+
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+            params = make_test_params(use_gpu=true)
+            params.presolve = "GPU"
+
+            result = HPRLP.optimize(model, params)
+
+            @test result.status == "OPTIMAL"
+            @test isapprox(result.primal_obj, 3.0, atol=1e-8)
+            @test (result.original_nRows, result.original_nCols) == (0, 1)
+            @test (result.presolved_nRows, result.presolved_nCols) == (0, 0)
+            @test length(result.x) == 1
+            @test length(result.y) == 0
+            @test length(result.z) == 1
+            @test isapprox(result.x[1], 1.0, atol=1e-8)
+            @test isapprox(result.original_p_feas, 0.0, atol=1e-8)
+            @test isapprox(result.original_d_feas, 0.0, atol=1e-8)
+            @test isapprox(result.original_gap, 0.0, atol=1e-8)
+        else
+            @test_skip "CUDA is not functional on this machine"
+        end
+    end
+
     @testset "Original KKT Metrics" begin
         A = sparse([1.0;;])
         AL = [1.0]
