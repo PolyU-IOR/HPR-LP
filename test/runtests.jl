@@ -183,6 +183,32 @@ ENDATA
         end
     end
 
+    @testset "True Batched GPU Workflow" begin
+        if HPRLP.CUDA.functional()
+            A = sparse([1.0 0.0; 0.0 1.0])
+            C = [-1.0 -1.2; -1.0 -0.8]
+            AL = [0.0 0.0; 0.0 0.0]
+            AU = [1.0 1.0; 1.0 1.0]
+            L = [0.0 0.0; 0.0 0.0]
+            U = [1.0 1.0; 1.0 1.0]
+
+            params = make_test_params(use_gpu=true)
+            params.max_iter = 200
+
+            result = HPRLP.optimize_batched_gpu(A, C, AL, AU, L, U, params)
+
+            @test size(result.X) == (2, 2)
+            @test size(result.Y) == (2, 2)
+            @test size(result.Z) == (2, 2)
+            @test all(result.status .== "OPTIMAL")
+            @test all(result.X .>= -1e-5)
+            @test all(result.X .<= 1.0 + 1e-5)
+            @test all(result.residuals .<= params.stoptol)
+        else
+            @test_skip "CUDA is not functional on this machine"
+        end
+    end
+
     @testset "Original KKT Metrics" begin
         A = sparse([1.0;;])
         AL = [1.0]
