@@ -25,6 +25,7 @@ include("algorithm.jl")
 include(joinpath("batch", "utils_gpu.jl"))
 include(joinpath("batch", "kernels_gpu.jl"))
 include(joinpath("batch", "algorithm_gpu.jl"))
+include(joinpath("batch", "dataset_gpu.jl"))
 include("MOI_wrapper.jl")
 include("PSLP.jl")
 using .PSLP
@@ -43,5 +44,6 @@ export allocate_batched_workspace_gpu, batched_spmm_A!, batched_spmm_AT!, batche
 export update_x_z_batched_gpu!, update_y_batched_gpu!, compute_batched_residuals_gpu!
 export update_x_z_check_batched_gpu!, update_x_z_normal_batched_gpu!
 export update_y_check_batched_gpu!, update_y_normal_batched_gpu!
+export run_batched_dataset
 
 end
