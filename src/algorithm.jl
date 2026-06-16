@@ -229,6 +229,7 @@ function compute_original_kkt_metrics(
         err_x_sq += max(0.0, lower - val, val - upper)^2
     end
     err_x = sqrt(err_x_sq)
+
     primal_feas = max(err_Ax, err_x) / norm_b
 
     dual_residual = model.c .- ATy .- zh
@@ -262,33 +263,178 @@ function check_org_recovery_failures(
     return failures
 end
 
+function release_presolve_state!(::Nothing)
+    return nothing
+end
+
+function release_presolve_state!(presolve_state)
+    if presolve_state isa GPUPresolver.AbstractPresolveState
+        free_external_gpu_presolve_state!(presolve_state)
+    elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
+        PSLP.free_presolver_wrapper(presolve_state)
+    else
+        free_custom_presolve_state!(presolve_state)
+    end
+    return nothing
+end
+
+function _finite_bound_violation(v::Float64, lo::Float64, hi::Float64)
+    if isfinite(lo) && v < lo
+        return lo - v
+    elseif isfinite(hi) && v > hi
+        return v - hi
+    end
+    return 0.0
+end
+
+function _repair_primal_row_feasibility!(
+    x::AbstractVector{Float64},
+    model::LP_info_cpu;
+    tol::Float64=1.0e-7,
+    max_passes::Int=12,
+)
+    A = model.A
+    AT = model.AT
+    changed = false
+    Ax = A * x
+
+    for _ in 1:max_passes
+        pass_changed = false
+        for row in eachindex(Ax)
+            ax = Ax[row]
+            target = if isfinite(model.AL[row]) && ax < model.AL[row] - tol
+                model.AL[row]
+            elseif isfinite(model.AU[row]) && ax > model.AU[row] + tol
+                model.AU[row]
+            else
+                continue
+            end
+
+            delta_ax = target - ax
+            best_col = 0
+            best_step = 0.0
+            best_abs_coeff = -1.0
+
+            for p in AT.colptr[row]:(AT.colptr[row + 1] - 1)
+                col = AT.rowval[p]
+                coeff = AT.nzval[p]
+                coeff == 0.0 && continue
+
+                step = delta_ax / coeff
+                candidate = x[col] + step
+                if _finite_bound_violation(candidate, model.l[col], model.u[col]) <= tol
+                    abs_coeff = abs(coeff)
+                    if abs_coeff > best_abs_coeff
+                        best_abs_coeff = abs_coeff
+                        best_col = col
+                        best_step = step
+                    end
+                end
+            end
+
+            best_col == 0 && continue
+
+            old_x = x[best_col]
+            new_x = old_x + best_step
+            if isfinite(model.l[best_col])
+                new_x = max(new_x, model.l[best_col])
+            end
+            if isfinite(model.u[best_col])
+                new_x = min(new_x, model.u[best_col])
+            end
+
+            actual_step = new_x - old_x
+            abs(actual_step) <= tol && continue
+            x[best_col] = new_x
+
+            for p in A.colptr[best_col]:(A.colptr[best_col + 1] - 1)
+                Ax[A.rowval[p]] += A.nzval[p] * actual_step
+            end
+            pass_changed = true
+            changed = true
+        end
+        pass_changed || break
+    end
+
+    return changed
+end
+
+function _compute_original_primal_feasibility(
+    model::LP_info_cpu,
+    x::AbstractVector{Float64},
+)
+    Ax = model.A * x
+    AL_nInf = replace(model.AL, -Inf => 0.0, Inf => 0.0)
+    AU_nInf = replace(model.AU, -Inf => 0.0, Inf => 0.0)
+    norm_b = 1.0 + norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
+
+    err_Ax_sq = 0.0
+    for i in eachindex(Ax)
+        val = Ax[i]
+        lower = model.AL[i]
+        upper = model.AU[i]
+        err_Ax_sq += max(0.0, lower - val, val - upper)^2
+    end
+
+    err_x_sq = 0.0
+    for j in eachindex(x)
+        val = x[j]
+        lower = model.l[j]
+        upper = model.u[j]
+        err_x_sq += max(0.0, lower - val, val - upper)^2
+    end
+
+    return max(sqrt(err_Ax_sq), sqrt(err_x_sq)) / norm_b
+end
+
+function _cpu_validation_model(model::LP_info_gpu)
+    CUDA.synchronize()
+    A = SparseMatrixCSC(model.A)
+    return LP_info_cpu(
+        A,
+        SparseMatrixCSC(model.AT),
+        Vector(model.c),
+        Vector(model.AL),
+        Vector(model.AU),
+        Vector(model.l),
+        Vector(model.u),
+        model.obj_constant,
+    )
+end
+
+function postsolve_and_validate_original_kkt!(
+    results::HPRLP_results,
+    original_model::LP_info_gpu,
+    presolve_state,
+    params::HPRLP_parameters,
+    presolve_params=nothing;
+    check_original_kkt::Bool=true,
+)
+    return postsolve_and_validate_original_kkt!(
+        results,
+        _cpu_validation_model(original_model),
+        presolve_state,
+        params,
+        presolve_params;
+        check_original_kkt=check_original_kkt,
+    )
+end
+
 function postsolve_and_validate_original_kkt!(
     results::HPRLP_results,
     original_model::LP_info_cpu,
     presolve_state,
     params::HPRLP_parameters,
-    presolve_params=nothing,
+    presolve_params=nothing;
+    check_original_kkt::Bool=true,
 )
-    if params.verbose
-        postsolve_label = if presolve_state isa GPUPresolve.PresolveState
-            "GPU POSTSOLVE"
-        elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
-            "PSLP POSTSOLVE"
-        else
-            "POSTSOLVE"
-        end
-        println("\n", "="^80)
-        println(postsolve_label)
-        println("="^80)
-    end
-
     postsolve_start = time()
     try
         x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
         y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
         z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
-        x_org, y_org, z_org = if presolve_state isa GPUPresolve.PresolveState
-            GPUPresolve.run_postsolve(
+        x_org, y_org, z_org = if presolve_state isa GPUPresolver.AbstractPresolveState
+            run_external_gpu_postsolve(
                 presolve_state,
                 x_red,
                 y_red,
@@ -298,27 +444,36 @@ function postsolve_and_validate_original_kkt!(
         elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
             PSLP.postsolve(presolve_state, x_red, y_red, z_red)
         else
-            error("Unsupported presolve state type: $(typeof(presolve_state))")
+            run_custom_postsolve(
+                presolve_state,
+                x_red,
+                y_red,
+                z_red;
+                presolve_params=presolve_params,
+            )
         end
         results.x = x_org
         results.y = y_org
         results.z = z_org
+        if results.status == "OPTIMAL" &&
+           _compute_original_primal_feasibility(original_model, results.x) > params.stoptol
+            _repair_primal_row_feasibility!(
+                results.x,
+                original_model;
+                tol=max(params.stoptol * 1.0e-3, 1.0e-12),
+                max_passes=12,
+            )
+        end
     finally
         results.postsolve_time = time() - postsolve_start
-        if params.verbose
-            println("Postsolve time: ", @sprintf("%.2f", results.postsolve_time), " seconds")
-        end
-        if presolve_state isa GPUPresolve.PresolveState
-            GPUPresolve.free_presolve_state!(presolve_state)
-        elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
-            PSLP.free_presolver_wrapper(presolve_state)
-        end
+        release_presolve_state!(presolve_state)
     end
 
-    if results.status == "OPTIMAL"
+    if check_original_kkt && results.status == "OPTIMAL"
         t_check_start = time()
         p_obj, d_obj, p_feas, d_feas, gap =
             compute_original_kkt_metrics(original_model, results.x, results.y, results.z)
+        results.primal_obj = p_obj
         results.original_p_feas = p_feas
         results.original_d_feas = d_feas
         results.original_gap = gap
@@ -329,7 +484,10 @@ function postsolve_and_validate_original_kkt!(
             failure_reasons = check_org_recovery_failures(
                 p_feas, d_feas, gap, params.stoptol)
             if params.verbose
-                println("Warning: postsolve original KKT check failed (but the primal solution and objective are reliable): $(join(failure_reasons, "; "))")
+                reliability_note = p_feas <= params.stoptol ?
+                    "the primal solution and objective are reliable" :
+                    "the reduced solution is optimal, but original primal recovery is not reliable"
+                println("Warning: postsolve original KKT check failed ($(reliability_note)): $(join(failure_reasons, "; "))")
                 println("Stop Tolerance: ", @sprintf("%.2e", params.stoptol))
                 println("Primal Objective: ", @sprintf("%+.12e", p_obj))
                 println("Dual Objective: ", @sprintf("%+.12e", d_obj))
@@ -343,13 +501,61 @@ function postsolve_and_validate_original_kkt!(
         if params.verbose
             println("Original KKT check time: ", @sprintf("%.2f", time() - t_check_start), " seconds")
         end
-    else
+    elseif check_original_kkt
         if params.verbose
             println("Skipping postsolve original KKT check since the reduced solution is not optimal")
         end
     end
 
     return nothing
+end
+
+function _print_postprocess_header(
+    has_postsolve::Bool,
+    postsolve_time::Real,
+    unfold_time::Real,
+)
+    println()
+    println("="^80)
+    println("POSTPROCESS")
+    println("="^80)
+    if has_postsolve
+        println("Postsolve time: ", @sprintf("%.2f", postsolve_time), " seconds")
+    end
+    println("Unfold time: ", @sprintf("%.2f", unfold_time), " seconds")
+end
+
+function _print_original_kkt_report(
+    original_kkt_passed::Bool,
+    failure_reasons::Vector{String},
+    stoptol::Real,
+    p_obj::Real,
+    d_obj::Real,
+    p_feas::Real,
+    d_feas::Real,
+    gap::Real,
+    check_time::Real,
+)
+    if original_kkt_passed
+        println("Original KKT check passed")
+    else
+        println("Warning: original KKT check failed: $(join(failure_reasons, "; "))")
+        println("Stop Tolerance: ", @sprintf("%.2e", stoptol))
+        println("Primal Objective: ", @sprintf("%+.12e", p_obj))
+        println("Dual Objective: ", @sprintf("%+.12e", d_obj))
+        println("Primal Residual: ", @sprintf("%.6e", p_feas))
+        println("Dual Residual: ", @sprintf("%.6e", d_feas))
+        println("Relative Gap: ", @sprintf("%.6e", gap))
+    end
+    println("Original KKT check time: ", @sprintf("%.2f", check_time), " seconds")
+end
+
+function _print_final_time_summary(results::HPRLP_results)
+    total_time = results.time + results.presolve_time + results.folding_time
+    println(@sprintf("Total time: %.2fs", total_time),
+        @sprintf("  solve time = %.2fs", results.time),
+        @sprintf("  presolve time = %.2fs", results.presolve_time),
+        @sprintf("  folding time = %.2fs", results.folding_time))
 end
 
 # the function to compute the residuals for the original LP problem
@@ -714,7 +920,13 @@ function collect_results_gpu!(
     results.time_8 = tolerance_times[3] == 0.0 ? results.time : tolerance_times[3]
     results.iter_8 = tolerance_iters[3] == 0 ? iter : tolerance_iters[3]
     results.presolve_time = 0.0
+    results.presolve_wall_time = 0.0
+    results.presolve_overhead_time = 0.0
     results.postsolve_time = 0.0
+    results.folding_time = 0.0
+    results.folded_nRows = ws.m
+    results.folded_nCols = ws.n
+    results.unfolded_kkt_passed = missing
     results.original_nRows = ws.m
     results.original_nCols = ws.n
     results.presolved_nRows = ws.m
@@ -762,7 +974,13 @@ function collect_results_cpu!(
     results.time_8 = tolerance_times[3] == 0.0 ? results.time : tolerance_times[3]
     results.iter_8 = tolerance_iters[3] == 0 ? iter : tolerance_iters[3]
     results.presolve_time = 0.0
+    results.presolve_wall_time = 0.0
+    results.presolve_overhead_time = 0.0
     results.postsolve_time = 0.0
+    results.folding_time = 0.0
+    results.folded_nRows = ws.m
+    results.folded_nCols = ws.n
+    results.unfolded_kkt_passed = missing
     results.original_nRows = ws.m
     results.original_nCols = ws.n
     results.presolved_nRows = ws.m
@@ -770,6 +988,105 @@ function collect_results_cpu!(
     results.reduced_p_feas = residuals.err_Rp_org_bar
     results.reduced_d_feas = residuals.err_Rd_org_bar
     results.reduced_gap = residuals.rel_gap_bar
+    results.original_p_feas = NaN
+    results.original_d_feas = NaN
+    results.original_gap = NaN
+    return results
+end
+
+function _host_vector(v)
+    return Vector{Float64}(Array(v))
+end
+
+function _solve_degenerate_model(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
+    t_start_alg = time()
+    m, n = size(model.A)
+    c = _host_vector(model.c)
+    l = _host_vector(model.l)
+    u = _host_vector(model.u)
+    AL = _host_vector(model.AL)
+    AU = _host_vector(model.AU)
+
+    x = zeros(Float64, n)
+    y = zeros(Float64, m)
+    z = zeros(Float64, n)
+    status = "OPTIMAL"
+    residual_error = 0.0
+    primal_obj = model.obj_constant
+
+    if n > 0
+        for j in 1:n
+            cj = c[j]
+            if cj > 0.0
+                if isinf(l[j]) && l[j] < 0.0
+                    status = "UNBOUNDED"
+                    residual_error = Inf
+                    break
+                end
+                x[j] = l[j]
+            elseif cj < 0.0
+                if isinf(u[j]) && u[j] > 0.0
+                    status = "UNBOUNDED"
+                    residual_error = Inf
+                    break
+                end
+                x[j] = u[j]
+            else
+                x[j] = min(max(0.0, l[j]), u[j])
+            end
+            z[j] = cj
+        end
+        if status == "OPTIMAL"
+            primal_obj += dot(c, x)
+        else
+            primal_obj = NaN
+        end
+    end
+
+    if status == "OPTIMAL" && m > 0
+        for i in 1:m
+            if AL[i] > 0.0 || AU[i] < 0.0
+                status = "INFEASIBLE"
+                residual_error = Inf
+                primal_obj = NaN
+                break
+            end
+        end
+    end
+
+    elapsed = time() - t_start_alg
+    results = HPRLP_results()
+    results.x = x
+    results.y = y
+    results.z = z
+    results.iter = 0
+    results.time = elapsed
+    results.power_time = 0.0
+    results.residuals = residual_error
+    results.primal_obj = primal_obj
+    results.gap = status == "OPTIMAL" ? 0.0 : Inf
+    results.status = status
+    results.time_4 = elapsed
+    results.iter_4 = 0
+    results.time_6 = elapsed
+    results.iter_6 = 0
+    results.time_8 = elapsed
+    results.iter_8 = 0
+    results.presolve_time = 0.0
+    results.presolve_wall_time = 0.0
+    results.presolve_overhead_time = 0.0
+    results.postsolve_time = 0.0
+    results.folding_time = 0.0
+    results.folded_nRows = m
+    results.folded_nCols = n
+    results.unfolded_kkt_passed = missing
+    results.original_nRows = m
+    results.original_nCols = n
+    results.presolved_nRows = m
+    results.presolved_nCols = n
+    results.reduced_p_feas = residual_error
+    results.reduced_d_feas = residual_error
+    results.reduced_gap = status == "OPTIMAL" ? 0.0 : Inf
     results.original_p_feas = NaN
     results.original_d_feas = NaN
     results.original_gap = NaN
@@ -1169,6 +1486,8 @@ function save_state_to_hdf5(
         file["parameters/print_frequency"] = params.print_frequency
         file["parameters/verbose"] = params.verbose
         file["parameters/auto_save"] = params.auto_save
+        file["parameters/folding"] = params.folding
+        file["parameters/folding_tolerance"] = params.folding_tolerance
 
         # Save initial solutions if provided
         if params.initial_x !== nothing
@@ -1261,6 +1580,7 @@ end
 function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu,LP_info_gpu})
     m, n = size(lp.A)
     presolve_backend = normalize_presolve_backend(params.presolve)
+    folding_mode = normalize_folding_mode(params.folding)
 
     # Count constraint types
     AL = lp.AL isa CuArray ? Vector(lp.AL) : lp.AL
@@ -1286,6 +1606,10 @@ function print_solver_parameters(params::HPRLP_parameters, lp::Union{LP_info_cpu
     println("  Check interval: ", params.check_iter)
     println("  Print frequency: ", params.print_frequency == -1 ? "Adaptive" : params.print_frequency)
     println("  Presolve: ", presolve_backend == "NONE" ? "Disabled" : presolve_backend)
+    println("  Folding: ", folding_mode == "NONE" ? "Disabled" : folding_mode)
+    if folding_mode != "NONE"
+        println("    Folding tolerance: ", params.folding_tolerance)
+    end
     println("  Scaling options:")
     println("    Curtis-Reid scaling: ", params.use_Curtis_Reid_scaling ? "Enabled ($(CURTIS_REID_SCALING_ITERS) iterations)" : "Disabled")
     println("    Ruiz scaling: ", params.use_Ruiz_scaling ? "Enabled" : "Disabled")
@@ -1658,78 +1982,171 @@ function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
     return power_time
 end
 
-function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+function warmup_folding!(
+    model::LP_info_gpu,
+    params::HPRLP_parameters;
+    tolerance::Float64=params.folding_tolerance,
+)
+    warmup_params = deepcopy(params)
+    warmup_params.verbose = false
+    try
+        warmup_model, _ = run_folding(
+            model;
+            tolerance=tolerance,
+            verbose=false,
+            params=warmup_params,
+        )
+        warmup_model = nothing
+    catch err
+        params.verbose && @warn "Folding warmup failed; continuing to measured folding." exception=(err, catch_backtrace())
+    finally
+        GC.gc(true)
+        if params.use_gpu && CUDA.functional()
+            CUDA.synchronize()
+            CUDA.reclaim()
+        end
+    end
+    return nothing
+end
+
+function _optimize_impl(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; presolve_params=nothing)
     presolve_backend = normalize_presolve_backend(params.presolve)
     params.presolve = presolve_backend
+    folding_mode = normalize_folding_mode(params.folding)
+    params.folding = folding_mode
     presolve_state = nothing
+    fold_map = nothing
     original_model = model
-    presolve_elapsed = 0.0
+    presolve_base_model = model
+    presolve_core_time = 0.0
+    presolve_wall_time = 0.0
+    folding_elapsed = 0.0
+    solve_params = params
 
     if params.use_gpu
         validate_gpu_parameters!(params)
     end
 
-    # Transfer once before GPU presolve so presolve and solve share the same GPU model.
-    if presolve_backend == "GPU" && params.use_gpu
-        model = setup_gpu_model(model, params)
-    elseif presolve_backend == "GPU" && !params.use_gpu
+    if model isa LP_info_gpu && !params.use_gpu
+        error("GPU model input requires params.use_gpu=true.")
+    end
+
+    if folding_mode != "NONE" && !params.use_gpu
+        error("Folding requires params.use_gpu=true.")
+    end
+
+    if presolve_backend == "GPU" && !params.use_gpu
         error("Presolve backend set to GPU, but use_gpu is false. Please set use_gpu=true to use GPU presolve.")
     end
 
-    # Presolve if requested
+    if model isa LP_info_gpu && presolve_backend == "PSLP"
+        error("PSLP presolve expects a CPU model. Use params.presolve=\"GPU\", \"CUSTOM\", or \"NONE\" for GPU model input.")
+    end
+
+    if folding_mode != "NONE"
+        if model isa LP_info_cpu
+            model = setup_gpu_model(model, params)
+        end
+
+        if params.warm_up
+            t_start_folding_warmup = time()
+            warmup_folding!(model, params; tolerance=params.folding_tolerance)
+            if params.verbose
+                println(@sprintf("Folding warmup time: %.2f seconds", time() - t_start_folding_warmup))
+            end
+        end
+
+        folding_start = time()
+        model, fold_map = run_folding(
+            model;
+            tolerance=params.folding_tolerance,
+            verbose=params.verbose,
+            params=params,
+        )
+        folding_elapsed = time() - folding_start
+        presolve_base_model = model
+
+        if fold_map !== nothing && (params.initial_x !== nothing || params.initial_y !== nothing)
+            solve_params = deepcopy(params)
+            solve_params.initial_x = fold_initial_vector(params.initial_x, fold_map.col_color_id, size(model.A, 2))
+            solve_params.initial_y = fold_initial_vector(params.initial_y, fold_map.row_color_id, size(model.A, 1))
+        end
+    end
+
+    if presolve_backend == "PSLP" && model isa LP_info_gpu
+        if params.verbose
+            println("COPY FOLDED MODEL TO CPU FOR PSLP ...")
+        end
+        t_start_pslp_cpu_copy = time()
+        model = _cpu_validation_model(model)
+        presolve_base_model = model
+        if params.verbose
+            println(@sprintf("COPY FOLDED MODEL TO CPU FOR PSLP time: %.2f seconds", time() - t_start_pslp_cpu_copy))
+        end
+    end
+
+    if params.warm_up && presolve_backend == "GPU"
+        t_start_presolve_warmup = time()
+        warmup_external_gpu_presolve!(params; presolve_params=presolve_params, model=model)
+        if params.verbose
+            println(@sprintf("GPU presolve warmup time: %.2f seconds", time() - t_start_presolve_warmup))
+        end
+    end
+
+    # Presolve if requested. If folding is enabled, presolve sees the folded
+    # model and postsolve must run before unfolding.
     if presolve_backend != "NONE"
-        presolve_start = time()
-        model, presolve_state = apply_presolve(
+        t_start_presolve = time()
+        model, presolve_state, presolve_core_time = apply_presolve(
             model,
-            params;
+            solve_params;
             presolve_params=presolve_params,
         )
-
-        presolve_elapsed = time() - presolve_start
-
+        presolve_wall_time = time() - t_start_presolve
     end
-    if params.use_gpu && presolve_backend != "GPU"
-        model = setup_gpu_model(model, params)
-    end
-    if params.verbose
+    if solve_params.verbose
+        println("Folding: ", folding_mode == "NONE" ? "Disabled" : folding_mode)
+        println("FOLDING time: ", @sprintf("%.2f seconds", folding_elapsed))
         println("Presolve backend: ", presolve_backend)
-        println("PRESOLVE time: ", @sprintf("%.2f seconds", presolve_elapsed))
         println("Original model: ", size(original_model.A, 1), " rows, ", size(original_model.A, 2), " cols")
+        if fold_map !== nothing
+            println("Folded model: ", size(presolve_base_model.A, 1), " rows, ", size(presolve_base_model.A, 2), " cols")
+        end
         println("Presolved model: ", size(model.A, 1), " rows, ", size(model.A, 2), " cols")
+        if presolve_backend == "PSLP"
+            println(@sprintf("Presolve time: %.2f seconds", presolve_core_time))
+        end
         println()
+    end
+    if solve_params.use_gpu && model isa LP_info_cpu
+        model = setup_gpu_model(model, solve_params)
+    elseif !solve_params.use_gpu && model isa LP_info_gpu
+        error("Presolve returned a GPU model while params.use_gpu=false. Set params.use_gpu=true or return a CPU model from run_custom_presolve.")
     end
 
     # Handle warmup if requested
     if params.warm_up
-        if params.verbose
-            println("="^80)
-            println("WARM UP PHASE")
-            println("  ℹ Running warmup to avoid JIT compilation overhead in main solve")
-            println("="^80)
-        end
         t_start_warmup = time()
 
         # Save original max_iter and verbose
-        original_max_iter = params.max_iter
-        original_verbose = params.verbose
-        params.max_iter = 200
-        params.verbose = false
+        original_max_iter = solve_params.max_iter
+        original_verbose = solve_params.verbose
+        solve_params.max_iter = 200
+        solve_params.verbose = false
 
         # Create a copy of the model for warmup
         warmup_model = deepcopy(model)
 
         # Run warmup solve
-        solve(warmup_model, params)
+        solve(warmup_model, solve_params)
 
         # Restore original parameters
-        params.max_iter = original_max_iter
-        params.verbose = original_verbose
+        solve_params.max_iter = original_max_iter
+        solve_params.verbose = original_verbose
 
         warmup_time = time() - t_start_warmup
         if params.verbose
             println(@sprintf("Warmup time: %.2f seconds", warmup_time))
-            println("="^80)
-            println()
         end
     end
 
@@ -1740,44 +2157,112 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
         println("="^80)
     end
 
-    setup_start = time()
-    results = solve(model, params)
-    setup_time = time() - setup_start - results.time
+    results = solve(model, solve_params)
 
-    if params.verbose
-        println(@sprintf("Total time: %.2fs", setup_time + results.time),
-            @sprintf("  setup time = %.2fs", setup_time),
-            @sprintf("  solve time = %.2fs", results.time))
-        println("="^80)
+    results.folding_time = folding_elapsed
+    results.folded_nRows, results.folded_nCols = size(presolve_base_model.A)
+    results.unfolded_kkt_passed = missing
+    results.original_nRows, results.original_nCols = size(original_model.A)
+    results.presolved_nRows, results.presolved_nCols = size(model.A)
+
+    if presolve_backend != "NONE"
+        results.presolve_time = presolve_core_time
+        results.presolve_wall_time = presolve_wall_time
+        results.presolve_overhead_time = presolve_wall_time - presolve_core_time
     end
 
     if presolve_state !== nothing
-        results.presolve_time = presolve_elapsed
-        results.original_nRows, results.original_nCols = size(original_model.A)
-        results.presolved_nRows, results.presolved_nCols = size(model.A)
+        if params.use_postsolve || fold_map !== nothing
+            postsolve_and_validate_original_kkt!(
+                results,
+                presolve_base_model,
+                presolve_state,
+                params,
+                presolve_params;
+                check_original_kkt=fold_map === nothing,
+            )
+        else
+            release_presolve_state!(presolve_state)
+            if params.verbose
+                println("Skipping presolve postsolve because params.use_postsolve = false.")
+            end
+        end
 
-        postsolve_and_validate_original_kkt!(
-            results,
-            original_model,
-            presolve_state,
-            params,
-            presolve_params,
-        )
+    end
 
+    if presolve_state === nothing && fold_map === nothing
+        results.original_p_feas = results.reduced_p_feas
+        results.original_d_feas = results.reduced_d_feas
+        results.original_gap = results.reduced_gap
+    end
+
+    if fold_map !== nothing
+        unfold_start = time()
+        unfold_results!(results, original_model, fold_map, params; log_kkt=false)
+        unfold_time = time() - unfold_start
+        postsolve_only_time = results.postsolve_time
+        results.postsolve_time += unfold_time
+
+        if results.status == "OPTIMAL"
+            t_check_start = time()
+            p_obj, d_obj, p_feas, d_feas, gap =
+                compute_original_kkt_metrics(original_model, results.x, results.y, results.z)
+            results.original_p_feas = p_feas
+            results.original_d_feas = d_feas
+            results.original_gap = gap
+            unfolded_kkt_error = max(p_feas, d_feas, gap)
+            unfolded_kkt_passed = unfolded_kkt_error <= params.stoptol
+            results.unfolded_kkt_passed = unfolded_kkt_passed
+            original_kkt_time = time() - t_check_start
+
+            if solve_params.verbose
+                failure_reasons = unfolded_kkt_passed ? String[] :
+                    check_org_recovery_failures(p_feas, d_feas, gap, params.stoptol)
+                _print_postprocess_header(
+                    presolve_state !== nothing,
+                    postsolve_only_time,
+                    unfold_time,
+                )
+                _print_original_kkt_report(
+                    unfolded_kkt_passed,
+                    failure_reasons,
+                    params.stoptol,
+                    p_obj,
+                    d_obj,
+                    p_feas,
+                    d_feas,
+                    gap,
+                    original_kkt_time,
+                )
+            end
+        elseif solve_params.verbose
+            _print_postprocess_header(
+                presolve_state !== nothing,
+                postsolve_only_time,
+                unfold_time,
+            )
+            println("Skipping unfolded original KKT check since the solution is not optimal")
+        end
+    end
+
+    if params.verbose
+        println("="^80)
+        _print_final_time_summary(results)
+        println("="^80)
     end
 
     return results
 end
 
 """
-    optimize(model::LP_info_cpu, params::HPRLP_parameters)
+    optimize(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
 
 Optimize a linear program using the HPR-LP algorithm.
 
 This function handles GPU transfer, scaling, and optional warmup internally based on the parameters.
 
 # Arguments
-- `model::LP_info_cpu`: LP model built from `build_from_Abc` or another constructor that returns `LP_info_cpu`
+- `model::Union{LP_info_cpu,LP_info_gpu}`: LP model built from `build_from_Abc`, `setup_gpu_model`, or another constructor
 - `params::HPRLP_parameters`: Solver parameters
 
 # Returns
@@ -1800,12 +2285,12 @@ println("Objective: ", result.primal_obj)
 
 See also: [`build_from_Abc`](@ref), [`HPRLP_parameters`](@ref)
 """
-function optimize(model::LP_info_cpu, params::HPRLP_parameters)
+function optimize(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
     return _optimize_impl(model, params)
 end
 
 function optimize(
-    model::LP_info_cpu,
+    model::Union{LP_info_cpu,LP_info_gpu},
     params::HPRLP_parameters,
     _original_model;
     presolve_params=nothing,
@@ -1843,13 +2328,17 @@ result = solve(model, params)
 See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
 function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
+    if any(iszero, size(model.A))
+        return _solve_degenerate_model(model, params)
+    end
+
     # Setup: scaling
     scaling_info = setup_scaling(model, params)
     lp = model
 
     # Main optimization algorithm
     if params.verbose
-        println("HPR-LP version v0.1.4")
+        println("HPR-LP version v0.1.7")
     end
     t_start_alg = time()
 

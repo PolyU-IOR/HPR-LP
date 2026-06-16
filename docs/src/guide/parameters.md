@@ -23,6 +23,8 @@ HPRLP provides extensive customization through the `HPRLP_parameters` type. This
 | `initial_y` | Vector/Nothing | nothing | - | Initial dual solution |
 | `auto_save` | Bool | false | true/false | Auto-save best solution |
 | `save_filename` | String | "hprlp_autosave.h5" | - | HDF5 filename for auto-save |
+| `presolve` | String | "GPU" | "GPU" / "PSLP" / "CUSTOM" / "NONE" | Presolve backend selector |
+| `use_postsolve` | Bool | false | true/false | Whether to replay postsolve after reduced solve |
 
 
 ## Creating Parameters
@@ -37,7 +39,41 @@ params = HPRLP_parameters()
 params.stoptol = 1e-6
 params.use_gpu = true
 params.verbose = true
+params.presolve = "CUSTOM"
 ```
+
+## Custom Presolve (`CUSTOM`)
+
+To plug your own presolve in, set:
+
+```julia
+params.presolve = "CUSTOM"
+```
+
+Then define these hooks:
+
+```julia
+function HPRLP.run_custom_presolve(model::HPRLP.LP_info_cpu, params::HPRLP.HPRLP_parameters; presolve_params=nothing)
+    return model, nothing
+end
+
+function HPRLP.run_custom_postsolve(
+    state,
+    x_red::AbstractVector{Float64},
+    y_red::AbstractVector{Float64},
+    z_red::AbstractVector{Float64};
+    presolve_params=nothing,
+)
+    return x_red, y_red, z_red
+end
+```
+
+If your custom backend changes variables/constraints, set `params.use_postsolve = true`.
+If it only solves a reduced-equivalent model and you want to keep reduced variables, set it to `false`.
+
+A full example template lives in `demo/custom_presolve_template.jl`.
+
+If your state owns external resources, also provide `HPRLP.free_custom_presolve_state!`.
 
 ## Convergence Parameters
 
@@ -163,6 +199,10 @@ To ensure accurate timing, due to Julia's JIT compilation, a warm-up phase can b
 params.warm_up = true   # Accurate timing (recommended)
 params.warm_up = false  # Skip warm-up
 ```
+
+!!! warning "GPU Presolve Requirement"
+    If `params.presolve == "GPU"`, then `params.use_gpu` must also be `true`.
+    HPRLP will raise an error if GPU presolve is selected while GPU solve is disabled.
 
 ## Output Parameters
 

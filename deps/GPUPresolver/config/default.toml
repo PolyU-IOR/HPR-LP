@@ -1,0 +1,77 @@
+# Example presolve configuration for GPUPresolver.
+#
+# Usage:
+#   setup = GPUPresolver.load_default_presolve_setup()
+
+[runtime]
+backend = "GPU"                     # "GPU" or "NONE"
+device_number = 0
+verbose = true
+scheduler_mode = "tiered"          # "fixed" or "tiered"
+tiered_bootstrap = true
+
+[problem]
+type = "LP"                         # "LP" or "QP"
+
+[limits]
+max_presolve_iters = 10
+max_presolve_time = 1000.0
+
+[tolerances]
+feasibility = 1e-6
+bound = 1e-6
+zero = 1e-10
+
+[rules]
+close_bounds = true
+empty_rows = true
+singleton_rows = true
+activity_checks = true
+primal_propagation = true
+parallel_rows = true
+empty_cols = true
+singleton_cols_eq = true
+singleton_cols_dual_infer = true
+doubleton_eq = true
+linear_eq_agg = false
+dual_fix = true
+parallel_cols = true
+redundant_bounds = false
+fme_projection = false
+structural_l1_substitution = true
+
+[structural_l1]
+pattern = "auto"
+gpu_only = true
+allow_main_flow_without_tape = true
+residual_bound_as_free_min = 1e8
+
+[doubleton]
+max_fill_in_proxy = 10
+scan = true
+min_selected_per_batch = 256
+min_selected_ratio = 0.005
+max_batch_rounds = 0
+max_time = 0.0
+
+[fme]
+zero_objective_only = true
+pair_limit = 8
+nnz_ratio_limit = 1.0
+nnz_abs_slack = 0
+max_elims_per_call = 0
+allow_main_flow_without_tape = false
+include_variable_bounds = false
+use_simple_screen = false
+simple_side_limit = 2
+verbose = false
+
+[qp]
+linear_eq_agg_max_support = 8
+doubleton_max_q_fill_abs = 64
+doubleton_max_q_fill_ratio = 2.0
+singleton_max_support = -1
+singleton_max_q_fill_abs = -1
+singleton_max_q_fill_ratio = "Inf"
+singleton_cols_eq_require_qdiag_zero = false
+doubleton_eq_require_qdiag_zero = false

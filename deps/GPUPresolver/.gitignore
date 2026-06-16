@@ -1,0 +1,10 @@
+GPU_Presolve_Rules_for_QP.pdf
+hans49 dims dton comparison.csv
+QP_dim_results/
+.DS_Store
+.codex/
+dev/
+.sync-tools/
+Manifest.toml
+*.tmp
+*.swp

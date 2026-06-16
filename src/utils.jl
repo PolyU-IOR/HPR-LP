@@ -12,7 +12,7 @@ function formulation(A, c, AL, AU, l, u, obj_constant)
     return standard_lp
 end
 
-const VALID_PRESOLVE_BACKENDS = ("GPU", "PSLP", "NONE")
+const VALID_PRESOLVE_BACKENDS = ("GPU", "PSLP", "CUSTOM", "NONE")
 
 function normalize_presolve_backend(backend)
     backend_name = if backend isa Bool
@@ -21,7 +21,7 @@ function normalize_presolve_backend(backend)
         uppercase(String(backend))
     end
     backend_name in VALID_PRESOLVE_BACKENDS || throw(ArgumentError(
-        "Unsupported presolve backend $(backend). Expected one of GPU, PSLP, NONE."))
+        "Unsupported presolve backend $(backend). Expected one of GPU, PSLP, CUSTOM, NONE."))
     return backend_name
 end
 
@@ -37,6 +37,7 @@ function run_presolve_with_fallback(
     backend_name::AbstractString,
     model,
     params::HPRLP_parameters,
+    ; fallback=(model, nothing),
 )
     try
         return runner()
@@ -50,34 +51,61 @@ function run_presolve_with_fallback(
                 @warn "GPU presolve fallback cleanup failed after presolve error." exception=(reclaim_err, catch_backtrace())
             end
         end
-        return model, nothing
+        return fallback
     end
 end
 
+_host_vector(v::AbstractVector) = collect(v)
+_host_sparse(A) = SparseMatrixCSC(A)
+
+function _lp_data_equal(lhs::Union{LP_info_cpu,LP_info_gpu}, rhs::Union{LP_info_cpu,LP_info_gpu})
+    size(lhs.A) == size(rhs.A) || return false
+    nnz(_host_sparse(lhs.A)) == nnz(_host_sparse(rhs.A)) || return false
+    lhs.obj_constant == rhs.obj_constant || return false
+
+    A_lhs = _host_sparse(lhs.A)
+    A_rhs = _host_sparse(rhs.A)
+    A_lhs == A_rhs || return false
+
+    return _host_vector(lhs.c) == _host_vector(rhs.c) &&
+           _host_vector(lhs.AL) == _host_vector(rhs.AL) &&
+           _host_vector(lhs.AU) == _host_vector(rhs.AU) &&
+           _host_vector(lhs.l) == _host_vector(rhs.l) &&
+           _host_vector(lhs.u) == _host_vector(rhs.u)
+end
+
+function _drop_noop_presolve_state!(
+    original_model::Union{LP_info_cpu,LP_info_gpu},
+    reduced_model::Union{LP_info_cpu,LP_info_gpu},
+    presolve_state,
+    params::HPRLP_parameters,
+    backend_name::AbstractString,
+)
+    if presolve_state !== nothing && _lp_data_equal(original_model, reduced_model)
+        params.verbose && println("$(backend_name) presolve made no model changes; skipping postsolve state.")
+        release_presolve_state!(presolve_state)
+        return original_model, nothing
+    end
+    return reduced_model, presolve_state
+end
+
 function apply_gpu_presolve(model::LP_info_gpu, params::HPRLP_parameters; presolve_params=nothing)
-    return run_presolve_with_fallback("GPU", model, params) do
+    return run_presolve_with_fallback("GPU", model, params; fallback=(model, nothing, 0.0)) do
         if params.verbose
             println("GPU PRESOLVE ...")
         end
-        t_start = time()
-
-        settings = GPUPresolve.Settings(
-            verbose=params.verbose,
-            device_number=params.device_number,
+        reduced_model, presolve_state, presolve_time = run_external_gpu_presolve(
+            model,
+            params;
             presolve_params=presolve_params,
         )
-        presolve_state, reduced_model = GPUPresolve.run_presolve(model; settings=settings)
-
-        if params.verbose
-            println(@sprintf("GPU PRESOLVE time: %.2f seconds", time() - t_start))
-        end
 
         if reduced_model === nothing || presolve_state === nothing
             println("GPU presolve failed or returned nothing.")
             if presolve_state !== nothing
-                GPUPresolve.free_presolve_state!(presolve_state)
+                free_external_gpu_presolve_state!(presolve_state)
             end
-            return model, nothing
+            return model, nothing, 0.0
         end
 
         if params.verbose
@@ -85,21 +113,27 @@ function apply_gpu_presolve(model::LP_info_gpu, params::HPRLP_parameters; presol
             println("GPU presolve objective offset: $(reduced_model.obj_constant - model.obj_constant)")
         end
 
-        return reduced_model, presolve_state
+        reduced_model, presolve_state = _drop_noop_presolve_state!(
+            model,
+            reduced_model,
+            presolve_state,
+            params,
+            "GPU",
+        )
+        return reduced_model, presolve_state, presolve_time
     end
 end
 
 function apply_pslp_presolve(model::LP_info_cpu, params::HPRLP_parameters)
     if !PSLP.is_available()
         params.verbose && println("PSLP dynamic library not found at $(PSLP.LIB_PATH). Skipping PSLP presolve.")
-        return model, nothing
+        return model, nothing, 0.0
     end
 
-    return run_presolve_with_fallback("PSLP", model, params) do
+    return run_presolve_with_fallback("PSLP", model, params; fallback=(model, nothing, 0.0)) do
         if params.verbose
             println("PSLP PRESOLVE ...")
         end
-        t_start = time()
 
         settings = PSLP.Settings(verbose=params.verbose)
         presolver_info, reduced_data = PSLP.load_and_run_presolve(
@@ -112,16 +146,12 @@ function apply_pslp_presolve(model::LP_info_cpu, params::HPRLP_parameters)
             settings=settings,
         )
 
-        if params.verbose
-            println(@sprintf("PSLP PRESOLVE time: %.2f seconds", time() - t_start))
-        end
-
         if reduced_data === nothing || presolver_info === nothing
             println("PSLP presolve failed or returned nothing.")
             if presolver_info !== nothing
                 PSLP.free_presolver_wrapper(presolver_info)
             end
-            return model, nothing
+            return model, nothing, 0.0
         end
 
         c_red, A_red, l_red, u_red, lhs_red, rhs_red, obj_offset = reduced_data
@@ -132,18 +162,65 @@ function apply_pslp_presolve(model::LP_info_cpu, params::HPRLP_parameters)
         end
 
         reduced_model = formulation(A_red, c_red, lhs_red, rhs_red, l_red, u_red, obj_offset)
-        return reduced_model, presolver_info
+        return reduced_model, presolver_info, PSLP.get_presolve_time(presolver_info)
+    end
+end
+
+function apply_custom_presolve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; presolve_params=nothing)
+    return run_presolve_with_fallback("CUSTOM", model, params; fallback=(model, nothing, 0.0)) do
+        if params.verbose
+            println("CUSTOM PRESOLVE ...")
+        end
+        reduced_model, state = run_custom_presolve(model, params; presolve_params=presolve_params)
+        if reduced_model === nothing
+            if state !== nothing
+                free_custom_presolve_state!(state)
+            end
+            println("Custom presolve returned `nothing` as reduced model. Skipping to original model.")
+            return model, nothing, 0.0
+        end
+        return reduced_model, state, 0.0
     end
 end
 
 function apply_presolve(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
     backend = normalize_presolve_backend(params.presolve)
     if backend == "GPU"
-        throw(ArgumentError("GPU presolve now requires an LP_info_gpu model. Route CPU->GPU transfer through optimize before calling GPU presolve."))
+        return run_presolve_with_fallback("GPU", model, params; fallback=(model, nothing, 0.0)) do
+            if params.verbose
+                println("GPU PRESOLVE ...")
+            end
+            reduced_model, presolve_state, presolve_time = run_external_gpu_presolve(
+                model,
+                params;
+                presolve_params=presolve_params,
+            )
+            if reduced_model === nothing || presolve_state === nothing
+                println("GPU presolve failed or returned nothing.")
+                if presolve_state !== nothing
+                    free_external_gpu_presolve_state!(presolve_state)
+                end
+                return model, nothing, 0.0
+            end
+            if params.verbose
+                println("GPU presolve reduced size: $(size(model.A)) -> $(size(reduced_model.A))")
+                println("GPU presolve objective offset: $(reduced_model.obj_constant - model.obj_constant)")
+            end
+            reduced_model, presolve_state = _drop_noop_presolve_state!(
+                model,
+                reduced_model,
+                presolve_state,
+                params,
+                "GPU",
+            )
+            return reduced_model, presolve_state, presolve_time
+        end
     elseif backend == "PSLP"
         return apply_pslp_presolve(model, params)
+    elseif backend == "CUSTOM"
+        return apply_custom_presolve(model, params; presolve_params=presolve_params)
     end
-    return model, nothing
+    return model, nothing, 0.0
 end
 
 function apply_presolve(model::LP_info_gpu, params::HPRLP_parameters; presolve_params=nothing)
@@ -152,8 +229,10 @@ function apply_presolve(model::LP_info_gpu, params::HPRLP_parameters; presolve_p
         return apply_gpu_presolve(model, params; presolve_params=presolve_params)
     elseif backend == "PSLP"
         throw(ArgumentError("PSLP presolve expects an LP_info_cpu model."))
+    elseif backend == "CUSTOM"
+        return apply_custom_presolve(model, params; presolve_params=presolve_params)
     end
-    return model, nothing
+    return model, nothing, 0.0
 end
 # Helper function to create scaling info and apply scaling to the LP problem
 const CURTIS_REID_SCALING_ITERS = 20
@@ -846,8 +925,299 @@ function release_solve_memory!(params::HPRLP_parameters)
     return nothing
 end
 
+function _safe_shifted_geomean(values)
+    numeric = Float64[]
+    for value in values
+        if value isa Number
+            value_f = Float64(value)
+            if isfinite(value_f)
+                push!(numeric, value_f)
+            end
+        end
+    end
+    isempty(numeric) && return NaN
+    return exp(mean(log.(numeric .+ 10.0))) - 10.0
+end
+
+_dataset_time_value(value) = value isa Number ? Float64(value) : NaN
+
+function _dataset_solve_time(raw_solve_time, time_limit)
+    return min(_dataset_time_value(raw_solve_time), Float64(time_limit))
+end
+
+function _dataset_total_time(solve_time, presolve_time, folding_time)
+    return _dataset_time_value(solve_time) +
+           _dataset_time_value(presolve_time) +
+           _dataset_time_value(folding_time)
+end
+
+function _dataset_result_columns()
+    return [
+        :name,
+        :iter,
+        :solve_time,
+        :total_time,
+        :presolve_time,
+        :folding_time,
+        :res,
+        :primal_obj,
+        :status,
+        :iter_4,
+        :time_4,
+        :iter_6,
+        :time_6,
+        :iter_8,
+        :time_8,
+    ]
+end
+
+function _snapshot_toml_quote(value::AbstractString)
+    escaped = replace(value, "\\" => "\\\\", "\"" => "\\\"")
+    return "\"" * escaped * "\""
+end
+
+function _snapshot_presolve_value(value)
+    if value isa Nothing
+        return _snapshot_toml_quote("nothing")
+    elseif value isa Symbol
+        return _snapshot_toml_quote(String(value))
+    elseif value isa AbstractVector
+        return "[" * join(_snapshot_presolve_value.(value), ", ") * "]"
+    elseif value isa Tuple
+        return "[" * join(_snapshot_presolve_value.(collect(value)), ", ") * "]"
+    elseif value isa Bool
+        return value ? "true" : "false"
+    elseif value isa AbstractFloat
+        if isfinite(value)
+            return string(Float64(value))
+        elseif isnan(value)
+            return _snapshot_toml_quote("NaN")
+        elseif value > 0
+            return _snapshot_toml_quote("Inf")
+        else
+            return _snapshot_toml_quote("-Inf")
+        end
+    elseif value isa Integer
+        return string(Int(value))
+    elseif value isa AbstractString
+        return _snapshot_toml_quote(String(value))
+    end
+    return _snapshot_toml_quote(string(value))
+end
+
+function _write_snapshot_line(io::IO, key::AbstractString, value; indent::Int=0)
+    prefix = repeat(" ", indent)
+    println(io, prefix, key, " = ", _snapshot_presolve_value(value))
+end
+
+function _tiered_bootstrap_snapshot_value(presolve_params)
+    if hasproperty(presolve_params, :enable_tiered_bootstrap)
+        return getproperty(presolve_params, :enable_tiered_bootstrap)
+    end
+    return getproperty(presolve_params, :gpu_presolve_scheduler) == :tiered
+end
+
+function _write_dataset_presolve_snapshot(
+    snapshot_path::AbstractString,
+    params::HPRLP_parameters,
+    presolve_params;
+    source_config_path=nothing,
+)
+    source_label = isnothing(source_config_path) ? (
+        isnothing(presolve_params) ? "package_defaults" : "explicit_presolve_params"
+    ) : String(source_config_path)
+    open(snapshot_path, "w") do io
+        println(io, "[meta]")
+        _write_snapshot_line(io, "locked_at", string(now()))
+        _write_snapshot_line(io, "source", source_label)
+        println(io)
+
+        println(io, "[hprlp]")
+        _write_snapshot_line(io, "time_limit", Float64(params.time_limit))
+        _write_snapshot_line(io, "stoptol", Float64(params.stoptol))
+        _write_snapshot_line(io, "device_number", Int(params.device_number))
+        _write_snapshot_line(io, "use_gpu", params.use_gpu)
+        _write_snapshot_line(io, "warm_up", params.warm_up)
+        _write_snapshot_line(io, "presolve", String(params.presolve))
+        _write_snapshot_line(io, "use_postsolve", params.use_postsolve)
+        _write_snapshot_line(io, "folding", String(params.folding))
+        _write_snapshot_line(io, "folding_tolerance", Float64(params.folding_tolerance))
+        _write_snapshot_line(io, "verbose", params.verbose)
+        println(io)
+
+        println(io, "[runtime]")
+        _write_snapshot_line(io, "backend", "GPU")
+        _write_snapshot_line(io, "device_number", Int(params.device_number))
+        _write_snapshot_line(io, "verbose", params.verbose)
+        if !isnothing(presolve_params)
+            _write_snapshot_line(io, "scheduler_mode", presolve_params.gpu_presolve_scheduler)
+            _write_snapshot_line(io, "tiered_bootstrap", _tiered_bootstrap_snapshot_value(presolve_params))
+        end
+        println(io)
+
+        if isnothing(presolve_params)
+            println(io, "# GPUPresolver parameters were not materialized in HPRLP; runtime defaults may have been used.")
+            return snapshot_path
+        end
+
+        println(io, "[problem]")
+        _write_snapshot_line(io, "type", "LP")
+        println(io)
+
+        println(io, "[limits]")
+        _write_snapshot_line(io, "max_presolve_iters", presolve_params.max_iters)
+        _write_snapshot_line(io, "max_presolve_time", presolve_params.max_time)
+        println(io)
+
+        println(io, "[tolerances]")
+        _write_snapshot_line(io, "feasibility", presolve_params.feasibility_tol)
+        _write_snapshot_line(io, "bound", presolve_params.bound_tol)
+        _write_snapshot_line(io, "zero", presolve_params.zero_tol)
+        _write_snapshot_line(io, "postsolve_tol", presolve_params.postsolve_tol)
+        println(io)
+
+        println(io, "[rules]")
+        _write_snapshot_line(io, "close_bounds", presolve_params.enable_close_bounds)
+        _write_snapshot_line(io, "empty_rows", presolve_params.enable_empty_rows)
+        _write_snapshot_line(io, "singleton_rows", presolve_params.enable_singleton_rows)
+        _write_snapshot_line(io, "activity_checks", presolve_params.enable_activity_checks)
+        _write_snapshot_line(io, "primal_propagation", presolve_params.enable_primal_propagation)
+        _write_snapshot_line(io, "parallel_rows", presolve_params.enable_parallel_rows)
+        _write_snapshot_line(io, "empty_cols", presolve_params.enable_empty_cols)
+        _write_snapshot_line(io, "singleton_cols_eq", presolve_params.enable_singleton_cols_eq)
+        _write_snapshot_line(io, "singleton_cols_dual_infer", presolve_params.enable_singleton_cols_dual_infer)
+        _write_snapshot_line(io, "doubleton_eq", presolve_params.enable_doubleton_eq)
+        _write_snapshot_line(io, "linear_eq_agg", presolve_params.enable_linear_eq_agg)
+        _write_snapshot_line(io, "dual_fix", presolve_params.enable_dual_fix)
+        _write_snapshot_line(io, "parallel_cols", presolve_params.enable_parallel_cols)
+        _write_snapshot_line(io, "fme_projection", presolve_params.enable_fme_projection)
+        _write_snapshot_line(io, "structural_l1_substitution", presolve_params.enable_structural_l1_substitution)
+        _write_snapshot_line(io, "redundant_bounds", presolve_params.enable_redundant_bounds)
+        println(io)
+
+        println(io, "[structural_l1]")
+        _write_snapshot_line(io, "pattern", presolve_params.structural_l1_pattern)
+        _write_snapshot_line(io, "allow_main_flow_without_tape", presolve_params.structural_l1_allow_main_flow_without_tape)
+        _write_snapshot_line(io, "gpu_only", presolve_params.structural_l1_gpu_only)
+        _write_snapshot_line(io, "residual_bound_as_free_min", presolve_params.structural_l1_residual_bound_as_free_min)
+        println(io)
+
+        println(io, "[fme]")
+        _write_snapshot_line(io, "zero_objective_only", presolve_params.fme_zero_objective_only)
+        _write_snapshot_line(io, "pair_limit", presolve_params.fme_pair_limit)
+        _write_snapshot_line(io, "nnz_ratio_limit", presolve_params.fme_nnz_ratio_limit)
+        _write_snapshot_line(io, "nnz_abs_slack", presolve_params.fme_nnz_abs_slack)
+        _write_snapshot_line(io, "max_elims_per_call", presolve_params.fme_max_elims_per_call)
+        _write_snapshot_line(io, "allow_main_flow_without_tape", presolve_params.fme_allow_main_flow_without_tape)
+        _write_snapshot_line(io, "include_variable_bounds", presolve_params.fme_include_variable_bounds)
+        _write_snapshot_line(io, "use_simple_screen", presolve_params.fme_use_simple_screen)
+        _write_snapshot_line(io, "simple_side_limit", presolve_params.fme_simple_side_limit)
+        _write_snapshot_line(io, "verbose", presolve_params.verbose_fme)
+        println(io)
+
+        println(io, "[scheduling]")
+        _write_snapshot_line(io, "row_rule_order", presolve_params.row_rule_order)
+        _write_snapshot_line(io, "col_rule_order", presolve_params.col_rule_order)
+        _write_snapshot_line(io, "tiered_bootstrap", _tiered_bootstrap_snapshot_value(presolve_params))
+        _write_snapshot_line(io, "tiered_cleanup_max_rounds", presolve_params.tiered_cleanup_max_rounds)
+        _write_snapshot_line(io, "tiered_light_continue_ratio", presolve_params.tiered_light_continue_ratio)
+        _write_snapshot_line(io, "tiered_cycle_stop_ratio", presolve_params.tiered_cycle_stop_ratio)
+        _write_snapshot_line(io, "tiered_max_light_streak", presolve_params.tiered_max_light_streak)
+        _write_snapshot_line(io, "tiered_global_period", presolve_params.tiered_global_period)
+        println(io)
+
+        println(io, "[doubleton]")
+        _write_snapshot_line(io, "max_fill_in_proxy", presolve_params.doubleton_eq_max_fill_in_proxy)
+        _write_snapshot_line(io, "scan", presolve_params.doubleton_eq_scan)
+        _write_snapshot_line(io, "min_selected_per_batch", presolve_params.doubleton_eq_min_selected_per_batch)
+        _write_snapshot_line(io, "min_selected_ratio", presolve_params.doubleton_eq_min_selected_ratio)
+        _write_snapshot_line(io, "max_batch_rounds", presolve_params.doubleton_eq_max_batch_rounds)
+        _write_snapshot_line(io, "max_time", presolve_params.doubleton_eq_max_time)
+        println(io)
+
+        println(io, "[qp]")
+        _write_snapshot_line(io, "linear_eq_agg_max_support", presolve_params.qp_linear_eq_agg_max_support)
+        _write_snapshot_line(io, "doubleton_max_q_fill_abs", presolve_params.qp_doubleton_max_q_fill_abs)
+        _write_snapshot_line(io, "doubleton_max_q_fill_ratio", presolve_params.qp_doubleton_max_q_fill_ratio)
+        _write_snapshot_line(io, "singleton_max_support", presolve_params.qp_singleton_max_support)
+        _write_snapshot_line(io, "singleton_max_q_fill_abs", presolve_params.qp_singleton_max_q_fill_abs)
+        _write_snapshot_line(io, "singleton_max_q_fill_ratio", presolve_params.qp_singleton_max_q_fill_ratio)
+        _write_snapshot_line(io, "singleton_cols_eq_require_qdiag_zero", presolve_params.qp_singleton_cols_eq_require_qdiag_zero)
+        _write_snapshot_line(io, "doubleton_eq_require_qdiag_zero", presolve_params.qp_doubleton_eq_require_qdiag_zero)
+        println(io)
+
+        println(io, "[advanced]")
+        _write_snapshot_line(io, "record_postsolve_tape", presolve_params.record_postsolve_tape)
+        _write_snapshot_line(io, "record_postsolve_tape_cpu", presolve_params.record_postsolve_tape_cpu)
+        _write_snapshot_line(io, "debug_checks", presolve_params.debug_checks)
+        _write_snapshot_line(io, "trace_enabled", presolve_params.trace_enabled)
+        _write_snapshot_line(io, "trace_path", presolve_params.trace_path)
+        _write_snapshot_line(io, "primal_propagation_min_tighten_abs", presolve_params.primal_propagation_min_tighten_abs)
+    end
+    return snapshot_path
+end
+
+function _env_bool(name::AbstractString, default::Bool)
+    raw = lowercase(strip(get(ENV, name, default ? "true" : "false")))
+    raw in ("1", "true", "yes", "on") && return true
+    raw in ("0", "false", "no", "off") && return false
+    return default
+end
+
+function _env_int(name::AbstractString, default::Int; min_value::Int, max_value::Int)
+    parsed = tryparse(Int, strip(get(ENV, name, string(default))))
+    value = isnothing(parsed) ? default : parsed
+    return clamp(value, min_value, max_value)
+end
+
+function _env_float(name::AbstractString, default::Float64; min_value::Float64, max_value::Float64)
+    parsed = tryparse(Float64, strip(get(ENV, name, string(default))))
+    value = isnothing(parsed) ? default : parsed
+    return clamp(value, min_value, max_value)
+end
+
+function _maybe_set_dataset_warmup_coverage_mps!(
+    data_path::String,
+    params::HPRLP_parameters,
+)
+    uppercase(strip(params.presolve)) == "GPU" || return nothing
+    params.warm_up || return nothing
+
+    if haskey(ENV, "GPUPRESOLVER_WARMUP_COVERAGE_MPS")
+        return nothing
+    end
+
+    if !_env_bool("GPUPRESOLVER_WARMUP_DATASET_MPS_AUTO", true)
+        return nothing
+    end
+
+    count = _env_int("GPUPRESOLVER_WARMUP_DATASET_MPS_COUNT", 3; min_value=0, max_value=16)
+    count == 0 && return nothing
+    max_mb = _env_float("GPUPRESOLVER_WARMUP_DATASET_MPS_MAX_MB", 64.0; min_value=0.0, max_value=10240.0)
+    max_bytes = round(Int, max_mb * 1024.0 * 1024.0)
+
+    candidates = Tuple{String,Int64}[]
+    for file in readdir(data_path)
+        occursin(r"\.mps(\.gz)?$"i, file) || continue
+        path = joinpath(data_path, file)
+        isfile(path) || continue
+        size_bytes = filesize(path)
+        size_bytes <= max_bytes || continue
+        push!(candidates, (path, size_bytes))
+    end
+
+    if isempty(candidates)
+        return nothing
+    end
+
+    sort!(candidates; by=x -> (x[2], x[1]))
+    selected = first(candidates, min(count, length(candidates)))
+    ENV["GPUPRESOLVER_WARMUP_COVERAGE_MPS"] = join(first.(selected), ",")
+    return nothing
+end
+
 # the function to test the HPR-LP algorithm on a dataset
-function run_dataset(data_path::String, result_path::String, params::HPRLP_parameters)
+function run_dataset(data_path::String, result_path::String, params::HPRLP_parameters; presolve_params=nothing)
     files = readdir(data_path)
 
     # Specify the path and filename for the CSV file
@@ -861,13 +1231,44 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
     end
 
     io = open(log_path, "a")
+    _maybe_set_dataset_warmup_coverage_mps!(data_path, params)
+
+    dataset_presolve_params = presolve_params
+    dataset_presolve_config_path = nothing
+    if isnothing(dataset_presolve_params) && uppercase(strip(params.presolve)) == "GPU"
+        dataset_presolve_config_path = _default_gpu_presolve_config_path()
+        if !isnothing(dataset_presolve_config_path)
+            dataset_presolve_params = load_gpu_presolve_setup(dataset_presolve_config_path).presolve_params
+        end
+    end
+
+    if uppercase(strip(params.presolve)) == "GPU"
+        snapshot_path = joinpath(result_path, "presolve_params_used.toml")
+        _write_dataset_presolve_snapshot(
+            snapshot_path,
+            params,
+            dataset_presolve_params;
+            source_config_path=dataset_presolve_config_path,
+        )
+    end
 
     # if csv file exists, read the existing results, where each column is an any array
     if isfile(csv_file)
         result_table = CSV.read(csv_file, DataFrame)
         namelist = Vector{Any}(result_table.name[1:end-2])
         iterlist = Vector{Any}(result_table.iter[1:end-2])
-        timelist = Vector{Any}(result_table.alg_time[1:end-2])
+        solve_timelist = if hasproperty(result_table, :solve_time)
+            Vector{Any}(result_table.solve_time[1:end-2])
+        elseif hasproperty(result_table, :alg_time)
+            Vector{Any}(result_table.alg_time[1:end-2])
+        else
+            fill(NaN, length(namelist))
+        end
+        presolve_timelist = if hasproperty(result_table, :presolve_time)
+            Vector{Any}(result_table.presolve_time[1:end-2])
+        else
+            fill(NaN, length(namelist))
+        end
         reslist = Vector{Any}(result_table.res[1:end-2])
         objlist = Vector{Any}(result_table.primal_obj[1:end-2])
         statuslist = Vector{Any}(result_table.status[1:end-2])
@@ -877,10 +1278,18 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
         time6list = Vector{Any}(result_table.time_6[1:end-2])
         iter8list = Vector{Any}(result_table.iter_8[1:end-2])
         time8list = Vector{Any}(result_table.time_8[1:end-2])
+        folding_time_list = hasproperty(result_table, :folding_time) ? Vector{Any}(result_table.folding_time[1:end-2]) : Vector{Any}(fill(missing, length(namelist)))
+        total_timelist = if hasproperty(result_table, :total_time)
+            Vector{Any}(result_table.total_time[1:end-2])
+        else
+            Any[_dataset_total_time(solve_timelist[i], presolve_timelist[i], folding_time_list[i]) for i in eachindex(namelist)]
+        end
     else
         namelist = []
         iterlist = []
-        timelist = []
+        solve_timelist = []
+        total_timelist = []
+        presolve_timelist = []
         reslist = []
         objlist = []
         statuslist = []
@@ -890,6 +1299,7 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
         time6list = []
         iter8list = []
         time8list = []
+        folding_time_list = []
     end
 
 
@@ -912,7 +1322,8 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
 
                     # Build and solve the model
                     model = build_from_mps(FILE_NAME, params.verbose)
-                    results = optimize(model, params)
+                    case_presolve_params = isnothing(dataset_presolve_params) ? nothing : deepcopy(dataset_presolve_params)
+                    results = optimize(model, params, model; presolve_params=case_presolve_params)
 
                     all_time = time() - t_start_all
                     println("Solve complete ----------------------------------------------------------------------------------------------------------")
@@ -926,7 +1337,11 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
 
                     push!(namelist, file)
                     push!(iterlist, results.iter)
-                    push!(timelist, min(results.time, params.time_limit))
+                    solve_time = _dataset_solve_time(results.time, params.time_limit)
+                    total_time = _dataset_total_time(solve_time, results.presolve_time, results.folding_time)
+                    push!(solve_timelist, solve_time)
+                    push!(total_timelist, total_time)
+                    push!(presolve_timelist, results.presolve_time)
                     push!(reslist, results.residuals)
                     push!(objlist, results.primal_obj)
                     push!(statuslist, results.status)
@@ -936,6 +1351,7 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                     push!(time6list, min(results.time_6, params.time_limit))
                     push!(iter8list, results.iter_8)
                     push!(time8list, min(results.time_8, params.time_limit))
+                    push!(folding_time_list, results.folding_time)
                 finally
                     model = nothing
                     results = nothing
@@ -945,7 +1361,10 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
 
             result_table = DataFrame(name=namelist,
                 iter=iterlist,
-                alg_time=timelist,
+                solve_time=solve_timelist,
+                total_time=total_timelist,
+                presolve_time=presolve_timelist,
+                folding_time=folding_time_list,
                 res=reslist,
                 primal_obj=objlist,
                 status=statuslist,
@@ -954,25 +1373,30 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                 iter_6=iter6list,
                 time_6=time6list,
                 iter_8=iter8list,
-                time_8=time8list
+                time_8=time8list,
             )
+            select!(result_table, _dataset_result_columns())
 
-            # compute the shifted geometric mean of the algorithm_time, put it in the last row
-            geomean_time = exp(mean(log.(timelist .+ 10.0))) - 10.0
-            geomean_time_4 = exp(mean(log.(time4list .+ 10.0))) - 10.0
-            geomean_time_6 = exp(mean(log.(time6list .+ 10.0))) - 10.0
-            geomean_time_8 = exp(mean(log.(time8list .+ 10.0))) - 10.0
-            geomean_iter = exp(mean(log.(iterlist .+ 10.0))) - 10.0
-            geomean_iter_4 = exp(mean(log.(iter4list .+ 10.0))) - 10.0
-            geomean_iter_6 = exp(mean(log.(iter6list .+ 10.0))) - 10.0
-            geomean_iter_8 = exp(mean(log.(iter8list .+ 10.0))) - 10.0
-            push!(result_table, ["SGM10", geomean_iter, geomean_time, "", "", "", geomean_iter_4, geomean_time_4, geomean_iter_6, geomean_time_6, geomean_iter_8, geomean_time_8])
+            # compute shifted geometric means and append them in the last rows
+            geomean_solve_time = _safe_shifted_geomean(solve_timelist)
+            geomean_total_time = _safe_shifted_geomean(total_timelist)
+            geomean_presolve_time = _safe_shifted_geomean(presolve_timelist)
+            geomean_folding_time = _safe_shifted_geomean(folding_time_list)
+            geomean_time_4 = _safe_shifted_geomean(time4list)
+            geomean_time_6 = _safe_shifted_geomean(time6list)
+            geomean_time_8 = _safe_shifted_geomean(time8list)
+            geomean_iter = _safe_shifted_geomean(iterlist)
+            geomean_iter_4 = _safe_shifted_geomean(iter4list)
+            geomean_iter_6 = _safe_shifted_geomean(iter6list)
+            geomean_iter_8 = _safe_shifted_geomean(iter8list)
+            push!(result_table, ["SGM10", geomean_iter, geomean_solve_time, geomean_total_time, geomean_presolve_time, geomean_folding_time, "", "", "", geomean_iter_4, geomean_time_4, geomean_iter_6, geomean_time_6, geomean_iter_8, geomean_time_8])
             # count the number of solved instances, termlist = "OPTIMAL" means solved
-            solved = count(x -> x < params.time_limit, timelist)
+            solved = count(x -> x < params.time_limit, solve_timelist)
+            solved_total = count(x -> x < params.time_limit, total_timelist)
             solved_4 = count(x -> x < params.time_limit, time4list)
             solved_6 = count(x -> x < params.time_limit, time6list)
             solved_8 = count(x -> x < params.time_limit, time8list)
-            push!(result_table, ["solved", "", solved, "", "", "", "", solved_4, "", solved_6, "", solved_8])
+            push!(result_table, ["solved", "", solved, solved_total, "", "", "", "", "", solved_4, "", solved_6, "", solved_8, ""])
 
             CSV.write(csv_file, result_table)
         end
@@ -981,4 +1405,3 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
 
     close(io)
 end
-

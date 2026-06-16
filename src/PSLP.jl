@@ -59,14 +59,40 @@ struct PresolverStruct
     reduced_prob::Ptr{PresolvedProblem}; sol::Ptr{Solution}
 end
 
+struct PresolveStats
+    n_rows_original::Csize_t
+    n_cols_original::Csize_t
+    nnz_original::Csize_t
+    n_rows_reduced::Csize_t
+    n_cols_reduced::Csize_t
+    nnz_reduced::Csize_t
+    nnz_removed_trivial::Csize_t
+    nnz_removed_fast::Csize_t
+    nnz_removed_primal_propagation::Csize_t
+    nnz_removed_parallel_rows::Csize_t
+    nnz_removed_parallel_cols::Csize_t
+    time_init::Float64
+    time_fast_reductions::Float64
+    time_medium_reductions::Float64
+    time_ston_cols::Float64
+    time_dton_rows::Float64
+    time_primal_propagation::Float64
+    time_parallel_rows::Float64
+    time_parallel_cols::Float64
+    time_presolve::Float64
+    time_postsolve::Float64
+end
+
 # ================= Wrapper Handle =================
 mutable struct PresolverModel
     ptr::Ptr{PresolverStruct}
     settings_ptr::Ptr{Settings}
+    presolve_time::Float64
     
     function PresolverModel(ptr::Ptr{PresolverStruct}, settings_ptr::Ptr{Settings})
         obj = new(ptr)
         obj.settings_ptr = settings_ptr
+        obj.presolve_time = 0.0
         finalizer(free_presolver_wrapper, obj)
         return obj
     end
@@ -77,9 +103,10 @@ const ACTIVE_REMOTE_PRESOLVER = Ref{Union{Nothing,PresolverModel}}(nothing)
 mutable struct RemotePresolverModel
     worker_id::Int
     active::Bool
+    presolve_time::Float64
 
-    function RemotePresolverModel(worker_id::Int)
-        obj = new(worker_id, true)
+    function RemotePresolverModel(worker_id::Int, presolve_time::Float64=0.0)
+        obj = new(worker_id, true, presolve_time)
         finalizer(free_presolver_wrapper, obj)
         return obj
     end
@@ -104,9 +131,7 @@ function free_presolver_wrapper(model::RemotePresolverModel)
     end
 
     try
-        remotecall_wait(model.worker_id) do
-            HPRLP.PSLP._remote_free_presolver!()
-        end
+        remotecall_wait(_remote_free_presolver!, model.worker_id)
     catch
     end
 
@@ -205,7 +230,7 @@ function _remote_prepare_presolve(
     end
 
     ACTIVE_REMOTE_PRESOLVER[] = model
-    return reduced_data
+    return reduced_data, model.presolve_time
 end
 
 function _remote_postsolve(
@@ -220,9 +245,17 @@ end
 
 _remote_ping() = myid()
 
+function get_presolve_time(model::PresolverModel)
+    return model.presolve_time
+end
+
+function get_presolve_time(model::RemotePresolverModel)
+    return model.presolve_time
+end
+
 function _spawn_isolated_worker()
     worker_id = only(addprocs(1; exeflags="--project=$(_pslp_project_dir())"))
-    Distributed.remotecall_eval(Main, worker_id, :(using HPRLP))
+    Distributed.remotecall_fetch(Core.eval, worker_id, Main, :(using HPRLP))
     return worker_id
 end
 
@@ -275,6 +308,10 @@ function load_and_run_presolve_local(
     
     # 4. Extract Reduced Data
     presolver_data = unsafe_load(model.ptr)
+    if presolver_data.stats != C_NULL
+        stats = unsafe_load(Ptr{PresolveStats}(presolver_data.stats))
+        model.presolve_time = stats.time_init + stats.time_presolve
+    end
     
     if presolver_data.reduced_prob == C_NULL
         return model, nothing 
@@ -316,16 +353,24 @@ function load_and_run_presolve(
 
     worker_id = _spawn_isolated_worker()
     try
-        reduced_data = remotecall_fetch(worker_id, c, A, l, u, lhs, rhs, settings) do c, A, l, u, lhs, rhs, settings
-            HPRLP.PSLP._remote_prepare_presolve(c, A, l, u, lhs, rhs; settings=settings)
-        end
+        reduced_data, presolve_time = remotecall_fetch(
+            _remote_prepare_presolve,
+            worker_id,
+            c,
+            A,
+            l,
+            u,
+            lhs,
+            rhs;
+            settings=settings,
+        )
 
         if reduced_data === nothing
             rmprocs(worker_id)
             return nothing, nothing
         end
 
-        return RemotePresolverModel(worker_id), reduced_data
+        return RemotePresolverModel(worker_id, presolve_time), reduced_data
     catch err
         try
             rmprocs(worker_id)
@@ -398,9 +443,7 @@ function postsolve(
 )
     !model.active && error("Remote PSLP worker has already been released.")
     try
-        return remotecall_fetch(model.worker_id, x_red, y_red, z_red) do x_red, y_red, z_red
-            HPRLP.PSLP._remote_postsolve(x_red, y_red, z_red)
-        end
+        return remotecall_fetch(_remote_postsolve, model.worker_id, x_red, y_red, z_red)
     catch err
         @warn "PSLP isolated worker failed during postsolve." exception=(err, catch_backtrace())
         rethrow()

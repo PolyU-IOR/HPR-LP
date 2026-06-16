@@ -13,6 +13,8 @@ params.device_number = 0
 params.use_gpu = true
 params.warm_up = true
 params.presolve = "GPU"
+params.use_postsolve = true
+params.folding = "GPU"
 
 # Optimize the model
 result = HPRLP.optimize(model, params)

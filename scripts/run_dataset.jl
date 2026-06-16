@@ -10,6 +10,8 @@ params.device_number = 0
 params.warm_up = true
 params.use_gpu = true
 params.presolve = "GPU"
+params.use_postsolve = true
+params.folding = "GPU"
 
 HPRLP.run_dataset(data_path, result_path, params)
 

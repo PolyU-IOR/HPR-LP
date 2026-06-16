@@ -4,6 +4,7 @@
 *.jl.mem
 deps/deps.jl
 Manifest.toml
+!/Manifest.toml
 
 # IDE
 .vscode/
@@ -18,3 +19,6 @@ Thumbs.db
 
 # Build artifacts
 docs/build/
+
+# Local benchmark data links
+benchmark_inputs/

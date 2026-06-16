@@ -151,7 +151,11 @@ const SUPPORTED_PARAMETERS = (
     "print_frequency",
     "verbose",
     "presolve",
+    "use_postsolve",
     "use_presolve",
+    "folding",
+    "use_folding",
+    "folding_tolerance",
 )
 
 function MOI.supports(::Optimizer, param::MOI.RawOptimizerAttribute)
@@ -192,6 +196,14 @@ function MOI.set(model::Optimizer, param::MOI.RawOptimizerAttribute, value)
         set_presolve_backend!(model.params, value)
     elseif name == "use_presolve"
         set_presolve_backend!(model.params, Bool(value))
+    elseif name == "use_postsolve"
+        model.params.use_postsolve = Bool(value)
+    elseif name == "folding"
+        set_folding_mode!(model.params, value)
+    elseif name == "use_folding"
+        set_folding_mode!(model.params, Bool(value))
+    elseif name == "folding_tolerance"
+        model.params.folding_tolerance = Float64(value)
     else
         throw(MOI.UnsupportedAttribute(param))
     end
@@ -232,6 +244,14 @@ function MOI.get(model::Optimizer, param::MOI.RawOptimizerAttribute)
         return String(model.params.presolve)
     elseif name == "use_presolve"
         return presolve_enabled(model.params)
+    elseif name == "use_postsolve"
+        return model.params.use_postsolve
+    elseif name == "folding"
+        return String(model.params.folding)
+    elseif name == "use_folding"
+        return folding_enabled(model.params)
+    elseif name == "folding_tolerance"
+        return model.params.folding_tolerance
     end
     throw(MOI.UnsupportedAttribute(param))
 end

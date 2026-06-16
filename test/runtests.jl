@@ -5,6 +5,18 @@ using SparseArrays
 using LinearAlgebra
 using Distributed
 
+struct TestIdentityPostsolveState end
+
+function HPRLP.run_custom_postsolve(
+    ::TestIdentityPostsolveState,
+    x_red::AbstractVector,
+    y_red::AbstractVector,
+    z_red::AbstractVector;
+    presolve_params=nothing,
+)
+    return collect(x_red), collect(y_red), collect(z_red)
+end
+
 function make_test_params(; use_gpu::Bool=false)
     params = HPRLP.HPRLP_parameters()
     params.time_limit = 60
@@ -38,6 +50,22 @@ end
         else
             @warn "MPS test file not found at $mps_file, skipping MPS test"
         end
+    end
+
+    @testset "Degenerate Reduced Model Solving" begin
+        A = sparse(Int32[], Int32[], Float64[], 0, 0)
+        model = HPRLP.build_from_Abc(A, Float64[], Float64[], Float64[], Float64[], Float64[], 7.5)
+        params = make_test_params()
+        params.use_gpu = true
+
+        result = HPRLP.solve(model, params)
+        @test result.status == "OPTIMAL"
+        @test result.iter == 0
+        @test result.primal_obj == 7.5
+        @test isempty(result.x)
+        @test isempty(result.y)
+        @test isempty(result.z)
+        @test result.residuals == 0.0
     end
 
     @testset "MPS Auto Format Fallback For Long Names" begin
@@ -118,6 +146,9 @@ ENDATA
         @test length(result.x) == 2
         @test result.x[1] >= -1e-6
         @test result.x[2] >= -1e-6
+        @test result.original_p_feas == result.reduced_p_feas
+        @test result.original_d_feas == result.reduced_d_feas
+        @test result.original_gap == result.reduced_gap
     end
 
     @testset "Presolve Failure Falls Back To Original Model" begin
@@ -141,6 +172,103 @@ ENDATA
         result = HPRLP.optimize(model, params)
         @test result.status == "OPTIMAL"
         @test isapprox(result.primal_obj, -26.4, atol=1e-2)
+    end
+
+    @testset "No-op Presolve Detection" begin
+        A = sparse([1.0 0.0; 0.0 2.0])
+        c = [3.0, 4.0]
+        AL = [1.0, 2.0]
+        AU = [1.0, 2.0]
+        l = [0.0, 0.0]
+        u = [Inf, Inf]
+
+        original = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+        identical = HPRLP.build_from_Abc(copy(A), copy(c), copy(AL), copy(AU), copy(l), copy(u))
+        changed_bounds = HPRLP.build_from_Abc(copy(A), copy(c), copy(AL), [1.0, 3.0], copy(l), copy(u))
+
+        @test HPRLP._lp_data_equal(original, identical)
+        @test !HPRLP._lp_data_equal(original, changed_bounds)
+    end
+
+    @testset "Dataset Time Accounting" begin
+        solve_time = HPRLP._dataset_solve_time(12.5, 10.0)
+        @test solve_time == 10.0
+        @test HPRLP._dataset_total_time(solve_time, 2.0, 3.5) == 15.5
+        @test HPRLP._dataset_result_columns() == [
+            :name,
+            :iter,
+            :solve_time,
+            :total_time,
+            :presolve_time,
+            :folding_time,
+            :res,
+            :primal_obj,
+            :status,
+            :iter_4,
+            :time_4,
+            :iter_6,
+            :time_6,
+            :iter_8,
+            :time_8,
+        ]
+    end
+
+    @testset "Pre-main Log Omits Presolve Timing Details" begin
+        A = sparse([1.0 0.0; 0.0 1.0])
+        c = [1.0, 2.0]
+        AL = [0.0, 0.0]
+        AU = [1.0, 1.0]
+        l = [0.0, 0.0]
+        u = [Inf, Inf]
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+        params = make_test_params()
+        params.verbose = true
+        params.presolve = "CUSTOM"
+
+        path = tempname()
+        try
+            open(path, "w") do io
+                redirect_stdout(io) do
+                    HPRLP.optimize(model, params)
+                end
+            end
+            output = read(path, String)
+
+            @test occursin("Presolve backend: CUSTOM", output)
+            @test occursin("Presolved model:", output)
+            @test !occursin("Presolve wall time:", output)
+            @test !occursin("Presolve core time:", output)
+            @test !occursin("Presolve overhead time:", output)
+        finally
+            rm(path, force=true)
+        end
+    end
+
+    @testset "LP Folding" begin
+        A = sparse([1.0 1.0; 1.0 1.0])
+        AL = [1.0, 1.0]
+        AU = [1.0, 1.0]
+        c = [1.0, 1.0]
+        l = [0.0, 0.0]
+        u = [1.0, 1.0]
+
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+        @test_throws ArgumentError HPRLP.run_folding(model; tolerance=1e-8, verbose=false)
+
+        fold_map = HPRLP.FoldingMap(2, 2, [1, 1], [1, 1], [0.5, 0.5], [0.5, 0.5])
+        x, y, z = HPRLP.unfold_solution(fold_map, [0.5], [2.0], [4.0])
+        @test x == [0.5, 0.5]
+        @test y == [1.0, 1.0]
+        @test z == [2.0, 2.0]
+
+        params = make_test_params()
+        params.folding = "NONE"
+        @test_throws ArgumentError HPRLP.run_folding(model; tolerance=1e-8, verbose=false, params=params)
+
+        HPRLP.set_folding_mode!(params, true)
+        @test params.folding == "GPU"
+        HPRLP.set_folding_mode!(params, false)
+        @test params.folding == "NONE"
     end
 
     @testset "PSLP Worker Isolation Bootstrap" begin
@@ -192,6 +320,146 @@ ENDATA
         @test isempty(HPRLP.check_org_recovery_failures(p_feas, d_feas, gap, 1e-10))
     end
 
+    @testset "Postsolve Primal Row Repair" begin
+        A = sparse([1.0 1.0])
+        AL = [0.0]
+        AU = [0.0]
+        c = [0.0, 0.0]
+        l = [0.0, -Inf]
+        u = [Inf, Inf]
+
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+        x = [0.0, 1.0e-3]
+        changed = HPRLP._repair_primal_row_feasibility!(x, model; tol=1.0e-10)
+
+        @test changed
+        @test isapprox(dot(A[1, :], x), 0.0, atol=1.0e-12)
+        @test x[1] >= l[1] - 1.0e-12
+    end
+
+    @testset "Postsolve And Unfold Share One Postprocess Log" begin
+        A = sparse([1.0;;])
+        AL = [1.0]
+        AU = [1.0]
+        c = [1.0]
+        l = [0.0]
+        u = [2.0]
+        model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
+        params = make_test_params()
+        params.verbose = true
+
+        postsolve_results = HPRLP.HPRLP_results()
+        postsolve_results.status = "OPTIMAL"
+        postsolve_results.x = [1.0]
+        postsolve_results.y = [0.0]
+        postsolve_results.z = [0.0]
+
+        postsolve_log = tempname()
+        try
+            open(postsolve_log, "w") do io
+                redirect_stdout(io) do
+                    HPRLP.postsolve_and_validate_original_kkt!(
+                        postsolve_results,
+                        model,
+                        TestIdentityPostsolveState(),
+                        params;
+                        check_original_kkt=false,
+                    )
+                end
+            end
+            output = read(postsolve_log, String)
+            @test !occursin("CUSTOM POSTSOLVE", output)
+            @test !occursin("Postsolve time:", output)
+            @test !occursin("postsolve original KKT", output)
+            @test !occursin("Original KKT check time:", output)
+        finally
+            rm(postsolve_log, force=true)
+        end
+
+        unfold_results = HPRLP.HPRLP_results()
+        unfold_results.status = "OPTIMAL"
+        unfold_results.x = [1.0]
+        unfold_results.y = [0.0]
+        unfold_results.z = [0.0]
+        fold_map = HPRLP.FoldingMap(1, 1, [1], [1], [1.0], [1.0])
+
+        unfold_log = tempname()
+        try
+            open(unfold_log, "w") do io
+                redirect_stdout(io) do
+                    HPRLP.unfold_results!(
+                        unfold_results,
+                        model,
+                        fold_map,
+                        params;
+                        log_kkt=false,
+                    )
+                end
+            end
+            output = read(unfold_log, String)
+            @test !occursin("Warning: unfolded original KKT check failed", output)
+            @test unfold_results.original_d_feas > params.stoptol
+        finally
+            rm(unfold_log, force=true)
+        end
+
+        postprocess_log = tempname()
+        try
+            open(postprocess_log, "w") do io
+                redirect_stdout(io) do
+                    HPRLP._print_postprocess_header(
+                        true,
+                        1.23,
+                        0.45,
+                    )
+                    HPRLP._print_original_kkt_report(
+                        false,
+                        ["dual recover failed"],
+                        1.0e-6,
+                        10.0,
+                        12.0,
+                        1.0e-8,
+                        2.0e-3,
+                        1.0e-4,
+                        0.67,
+                    )
+                end
+            end
+            output = read(postprocess_log, String)
+            @test occursin("POSTPROCESS", output)
+            @test occursin("Postsolve time: 1.23 seconds", output)
+            @test occursin("Unfold time: 0.45 seconds", output)
+            @test occursin("Warning: original KKT check failed: dual recover failed", output)
+            @test occursin("Original KKT check time: 0.67 seconds", output)
+            @test !occursin("CUSTOM POSTSOLVE", output)
+            @test !occursin("UNFOLD", output)
+        finally
+            rm(postprocess_log, force=true)
+        end
+
+        time_results = HPRLP.HPRLP_results()
+        time_results.time = 7.57
+        time_results.presolve_time = 0.03
+        time_results.folding_time = 0.02
+
+        time_log = tempname()
+        try
+            open(time_log, "w") do io
+                redirect_stdout(io) do
+                    HPRLP._print_final_time_summary(time_results)
+                end
+            end
+            output = read(time_log, String)
+            @test occursin("Total time: 7.62s", output)
+            @test occursin("solve time = 7.57s", output)
+            @test occursin("presolve time = 0.03s", output)
+            @test occursin("folding time = 0.02s", output)
+            @test !occursin("setup time", output)
+        finally
+            rm(time_log, force=true)
+        end
+    end
+
     @testset "Original KKT Error" begin
         @test max(1e-3, 2e-4, 3e-5) == 1e-3
         @test max(2e-6, 5e-5, 4e-6) == 5e-5
@@ -203,6 +471,67 @@ ENDATA
         @test HPRLP.check_org_recovery_failures(2e-6, 2e-4, 3e-6, 1e-4) == ["dual recover failed"]
         @test HPRLP.check_org_recovery_failures(2e-6, 2e-6, 3e-4, 1e-4) == ["dual recover failed"]
         @test HPRLP.check_org_recovery_failures(2e-4, 2e-4, 3e-6, 1e-4) == ["primal recover failed", "dual recover failed"]
+    end
+
+    @testset "Structural L1 Rewrite Enabled By Default" begin
+        params_default = HPRLP.GPUPresolver.GPUBackend.PresolveParams()
+        @test params_default.structural_l1_allow_main_flow_without_tape == true
+
+        config_path = joinpath(@__DIR__, "..", "deps", "GPUPresolver", "config", "default.toml")
+        config_default = HPRLP.load_gpu_presolve_params(config_path)
+        @test config_default.structural_l1_allow_main_flow_without_tape == true
+    end
+
+    @testset "GPU Singleton Column Postsolve Respects Bounds" begin
+        if HPRLP.GPUPresolver.CUDA.functional()
+            pparams = HPRLP.GPUPresolver.GPUBackend.PresolveParams()
+            pparams.max_iters = 1
+            pparams.enable_close_bounds = false
+            pparams.enable_empty_rows = false
+            pparams.enable_singleton_rows = false
+            pparams.enable_activity_checks = false
+            pparams.enable_primal_propagation = false
+            pparams.enable_parallel_rows = false
+            pparams.enable_redundant_bounds = false
+            pparams.enable_empty_cols = false
+            pparams.enable_singleton_cols_eq = true
+            pparams.enable_singleton_cols_dual_infer = false
+            pparams.enable_doubleton_eq = false
+            pparams.enable_dual_fix = false
+            pparams.enable_parallel_cols = false
+            pparams.row_rule_order = Symbol[]
+            pparams.col_rule_order = [:singleton_cols_eq]
+
+            problem = HPRLP.GPUPresolver.LPProblem(HPRLP.GPUPresolver.build_from_Abc(
+                sparse([1.0e-4 1.0]),
+                [0.0, 0.0],
+                [0.0],
+                [0.0],
+                [0.0, -Inf],
+                [Inf, Inf],
+                0.0,
+            ))
+            result = HPRLP.GPUPresolver.run_presolve(
+                problem;
+                config=HPRLP.GPUPresolver.PresolveConfig(
+                    backend="GPU",
+                    verbose=false,
+                    presolve_params=pparams,
+                ),
+            )
+            @test result.status == "OK"
+            x_org, _, _ = HPRLP.GPUPresolver.run_postsolve(
+                result.state,
+                [1.0e-3],
+                [0.0],
+                [0.0],
+            )
+            @test x_org[1] >= -1.0e-12
+            @test isapprox(x_org[1], 0.0, atol=1.0e-12)
+            @test HPRLP.GPUPresolver.free_presolve_state!(result.state) === nothing
+        else
+            @info "CUDA is not functional; skipping GPU singleton column postsolve bound test"
+        end
     end
     
     @testset "JuMP Integration - Optimizer" begin
@@ -232,6 +561,10 @@ ENDATA
         @test params.warm_up == true
         @test params.print_frequency == -1
         @test params.verbose == true
+        @test !(:print_level in fieldnames(HPRLP.HPRLP_parameters))
+        @test !HPRLP.MOI.supports(HPRLP.Optimizer(), HPRLP.MOI.RawOptimizerAttribute("print_level"))
+        @test params.folding == "NONE"
+        @test params.folding_tolerance == 1e-8
         
         # Test parameter modification
         params.stoptol = 1e-6
@@ -245,6 +578,9 @@ ENDATA
 
         params.presolve = "NONE"
         @test params.presolve == "NONE"
+
+        params.folding = "GPU"
+        @test params.folding == "GPU"
     end
     
     @testset "Results Structure" begin

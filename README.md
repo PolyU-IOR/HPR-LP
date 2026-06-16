@@ -70,13 +70,13 @@ using CUDA
 CUDA.versioninfo()
 ```
 
----
-
 ## Usage 1: Test Instances in MPS Format
 
 ### Setting Data and Result Paths
 
-> Before running the scripts, please modify **`run_single_file.jl`** or **`run_dataset.jl`** in the scripts directory to specify the data path and result path according to your setup.
+Before running the scripts, please modify `run_single_file.jl` or
+`run_dataset.jl` in the scripts directory to specify the data path and solver
+parameters according to your setup.
 
 ### Running a Single Instance
 
@@ -84,6 +84,32 @@ To test the script on a single instance (`.mps` file):
 
 ```bash
 julia --project scripts/run_single_file.jl
+```
+
+The default script format is:
+
+```julia
+import HPRLP
+
+file_name = "model.mps" # Replace with the actual path to your LP file
+
+# Build the model from MPS file
+model = HPRLP.build_from_mps(file_name)
+
+# Set up parameters
+params = HPRLP.HPRLP_parameters()
+params.time_limit = 3600
+params.stoptol = 1e-4
+params.device_number = 0
+params.use_gpu = true
+params.warm_up = true
+params.presolve = "GPU"
+
+# Optimize the model
+result = HPRLP.optimize(model, params)
+
+println("Objective value: ", result.primal_obj)
+println("Status: ", result.status)
 ```
 
 ### Running All Instances in a Directory
@@ -186,6 +212,8 @@ Below is a list of the parameters in HPR-LP along with their default values and 
     <tr><td><code>use_Pock_Chambolle_scaling</code></td><td><code>true</code></td><td>Whether to use the Pock-Chambolle scaling.</td></tr>
     <tr><td><code>use_bc_scaling</code></td><td><code>true</code></td><td>Whether to use the scaling for b and c.</td></tr>
     <tr><td><code>use_gpu</code></td><td><code>true</code></td><td>Whether to use GPU or not.</td></tr>
+    <tr><td><code>presolve</code></td><td><code>"GPU"</code></td><td>Presolve backend: <code>"GPU"</code>, <code>"PSLP"</code>, <code>"CUSTOM"</code>, <code>"NONE"</code>.</td></tr>
+    <tr><td><code>use_postsolve</code></td><td><code>false</code></td><td>Whether to replay postsolve when presolve is enabled.</td></tr>
     <tr><td><code>print_frequency</code></td><td><code>-1</code> (auto)</td><td>Print the log every <code>print_frequency</code> iterations.</td></tr>
     <tr><td><code>verbose</code></td><td><code>true</code></td><td>Whether to print solver output. Set to <code>false</code> for silent mode.</td></tr>
     <tr><td><code>initial_x</code></td><td><code>nothing</code></td><td>Initial primal solution vector (optional).</td></tr>
@@ -194,6 +222,69 @@ Below is a list of the parameters in HPR-LP along with their default values and 
     <tr><td><code>save_filename</code></td><td><code>"hprlp_autosave.h5"</code></td><td>Filename for auto-save HDF5 file.</td></tr>
   </tbody>
 </table>
+
+## Custom Presolve Backend (`CUSTOM`)
+
+Set these options and implement the hooks in your own Julia file:
+
+```julia
+using HPRLP
+
+struct MyPresolveState
+    obj_constant_offset::Float64
+end
+
+function HPRLP.build_custom_presolve_state(
+    original_model::HPRLP.LP_info_cpu,
+    reduced_model::HPRLP.LP_info_cpu,
+    params::HPRLP.HPRLP_parameters;
+    presolve_params=nothing,
+)
+    return MyPresolveState(0.0)
+end
+
+function HPRLP.run_custom_presolve(
+    model::HPRLP.LP_info_cpu,
+    params::HPRLP.HPRLP_parameters;
+    presolve_params=nothing,
+)
+    # ... do your reductions here ...
+    reduced_model = model
+    state = MyPresolveState(model.obj_constant)
+    return reduced_model, state
+end
+
+function HPRLP.run_custom_postsolve(
+    state::MyPresolveState,
+    x_red::AbstractVector{Float64},
+    y_red::AbstractVector{Float64},
+    z_red::AbstractVector{Float64};
+    presolve_params=nothing,
+)
+    # ... lift (x_red, y_red, z_red) back to original problem ...
+    return x_red, y_red, z_red
+end
+```
+
+And configure:
+
+```julia
+params.presolve = "CUSTOM"
+params.use_postsolve = true  # must be true if your custom reductions change model structure
+```
+
+If `params.use_postsolve = false`, the solver will skip postsolve and return the reduced-model solution directly.
+
+When your state owns external resources, also define:
+
+```julia
+HPRLP.free_custom_presolve_state!(state::MyPresolveState) = nothing
+```
+
+`run_custom_postsolve` is where you decide whether to reuse your own replay logic or simply call
+`return x_red, y_red, z_red` for no-op lifting.
+
+You can also copy and adapt `demo/custom_presolve_template.jl` as a starting point.
 
 ---
 
@@ -243,5 +334,3 @@ println("x2 = ", result.x[2])
 Kaihuang Chen, [Defeng Sun](https://www.polyu.edu.hk/ama/profile/dfsun//), [Yancheng Yuan](https://www.polyu.edu.hk/ama/people/academic-staff/dr-yuan-yancheng/?sc_lang=en), Guojun Zhang, and [Xinyuan Zhao](https://scholar.google.com/citations?user=nFG8lEYAAAAJ&hl=en), “[HPR-LP: An implementation of an HPR method for solving linear programming](https://www.polyu.edu.hk/ama/profile/dfsun//files/HPR-LP_Published2025.pdf)”, arXiv:2408.12179 (August 2024), [Mathematical Programming Computation](https://link.springer.com/journal/12532) 17 (2025), doi.org/10.1007/s12532-025-00292-0.
 
 ---
-
-

@@ -36,8 +36,10 @@ Parameters for the HPR-LP solver.
 - `initial_y::Union{Vector{Float64},Nothing}`: Initial dual solution (default: nothing)
 - `auto_save::Bool`: Automatically save best x, y, and sigma during optimization (default: false)
 - `save_filename::String`: Filename for auto-save HDF5 file (default: "hprlp_autosave.h5")
-- `presolve::String`: Presolve backend selector (`"GPU"`, `"PSLP"`, `"NONE"`) (default: `"GPU"`)
+- `presolve::String`: Presolve backend selector (`"GPU"`, `"PSLP"`, `"CUSTOM"`, `"NONE"`) (default: `"GPU"`)
 - `use_postsolve::Bool`: Enable postsolve replay after reduced-model presolve (default: false)
+- `folding::String`: Folding selector (`"GPU"`, `"NONE"`) (default: `"NONE"`)
+- `folding_tolerance::Float64`: Coefficient/bound tolerance used by folding color refinement (default: `1e-8`)
 
 # Example
 ```julia
@@ -110,14 +112,20 @@ mutable struct HPRLP_parameters
     # filename for auto-save HDF5 file, default is "hprlp_autosave.h5"
     save_filename::String
 
-    # presolve backend selector ("GPU", "PSLP", "NONE"), default is "GPU"
+    # Presolve backend selector ("GPU", "PSLP", "CUSTOM", "NONE"), default is "GPU"
     presolve::String
 
     # whether to replay postsolve after reduced-model presolve
     use_postsolve::Bool
 
+    # folding selector ("GPU", "NONE"); folding is separate from presolve
+    folding::String
+
+    # coefficient/bound tolerance used by folding color refinement
+    folding_tolerance::Float64
+
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false, "NONE", 1e-8)
 end
 
 """
@@ -206,8 +214,20 @@ mutable struct HPRLP_results
     z::AbstractVector{Float64}
 
     # Presolve / postsolve time summary
+    # presolve_time stores backend-reported presolve time. For PSLP, this follows
+    # cuPDLPx's presolve timing scope: PSLP init + PSLP run, excluding postsolve.
+    # presolve_wall_time stores end-to-end wall-clock time spent in apply_presolve
+    # presolve_overhead_time = presolve_wall_time - presolve_time
     presolve_time::Float64
+    presolve_wall_time::Float64
+    presolve_overhead_time::Float64
     postsolve_time::Float64
+
+    # Folding summary
+    folding_time::Float64
+    folded_nRows::Int
+    folded_nCols::Int
+    unfolded_kkt_passed::Union{Bool,Missing}
 
     # Presolve dimension summary
     original_nRows::Int
