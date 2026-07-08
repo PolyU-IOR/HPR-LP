@@ -116,8 +116,10 @@ mutable struct HPRLP_parameters
     # whether to replay postsolve after reduced-model presolve
     use_postsolve::Bool
 
+    debug_restart::Bool
+
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false, false)
 end
 
 """
@@ -266,6 +268,9 @@ mutable struct HPRLP_saved_state_gpu
     
     # Best y found so far (GPU)
     save_y::CuVector{Float64}
+
+    # Best z found so far (GPU)
+    save_z::CuVector{Float64}
     
     # Best sigma value
     save_sigma::Float64
@@ -298,6 +303,9 @@ mutable struct HPRLP_saved_state_cpu
     
     # Best y found so far (CPU)
     save_y::Vector{Float64}
+
+    # Best z found so far (CPU)
+    save_z::Vector{Float64}
     
     # Best sigma value
     save_sigma::Float64
@@ -505,8 +513,12 @@ mutable struct HPRLP_residuals
     # The relative residuals of the primal feasibility evaluated at x_bar
     err_Rp_org_bar::Float64
 
+    err_Rp_abs::Float64
+
     # The relative residuals of the dual feasibility evaluated at y_bar and z_bar
     err_Rd_org_bar::Float64
+
+    err_Rd_abs::Float64
 
     # The primal objective value evaluated at x_bar
     primal_obj_bar::Float64
