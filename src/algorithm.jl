@@ -426,6 +426,9 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     res.err_Rd_org_bar = sc.c_scale * reduction_scalars_host[4] / sc.norm_c_org
     res.err_Rp_org_bar = sc.b_scale * reduction_scalars_host[5] / sc.norm_b_org
 
+    res.err_Rd_abs = reduction_scalars_host[4]
+    res.err_Rp_abs = reduction_scalars_host[5]
+
     if iter == 0
         res.err_Rp_org_bar = max(res.err_Rp_org_bar, sc.b_scale * CUDA.norm(ws.dx))
     end
@@ -452,6 +455,7 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
         if iter == 0 || res.KKTx_and_gap_org_bar < max(ws.saved_state.save_err_Rp, ws.saved_state.save_err_Rd, ws.saved_state.save_rel_gap)
             ws.saved_state.save_x .= ws.x_bar
             ws.saved_state.save_y .= ws.y_bar
+            ws.saved_state.save_z .= ws.z_bar
             ws.saved_state.save_sigma = ws.sigma
             ws.saved_state.save_iter = iter
             ws.saved_state.save_err_Rp = res.err_Rp_org_bar
@@ -493,11 +497,13 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
 
     ### Rd
     compute_err_Rd_cpu!(ws, sc)
-    res.err_Rd_org_bar = sc.c_scale * norm(ws.Rd) / sc.norm_c_org
+    res.err_Rd_abs = norm(ws.Rd)
+    res.err_Rd_org_bar = sc.c_scale * res.err_Rd_abs / sc.norm_c_org
 
     ### Rp
     compute_err_Rp_cpu!(ws, sc)
-    res.err_Rp_org_bar = sc.b_scale * norm(ws.Rp) / sc.norm_b_org
+    res.err_Rp_abs = norm(ws.Rp)
+    res.err_Rp_org_bar = sc.b_scale * res.err_Rp_abs / sc.norm_b_org
 
     if iter == 0
         res.err_Rp_org_bar = max(res.err_Rp_org_bar, sc.b_scale * norm((ws.x_bar - max.(min.(ws.x_bar, ws.u), ws.l)) ./ sc.col_norm))
@@ -511,9 +517,10 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
 
     # Save best values if auto_save is enabled
     if params.auto_save
-        if iter == 0 || res.KKTx_and_gap_org_bar < restart_info.best_gap
+        if iter == 0 || res.KKTx_and_gap_org_bar < max(ws.saved_state.save_err_Rp, ws.saved_state.save_err_Rd, ws.saved_state.save_rel_gap)
             ws.saved_state.save_x .= ws.x_bar
             ws.saved_state.save_y .= ws.y_bar
+            ws.saved_state.save_z .= ws.z_bar
             ws.saved_state.save_sigma = ws.sigma
             ws.saved_state.save_iter = iter
             ws.saved_state.save_err_Rp = res.err_Rp_org_bar
@@ -599,7 +606,7 @@ end
 # the function to check whether to restart the algorithm
 function check_restart(restart_info::HPRLP_restart,
     iter::Int,
-    check_iter::Int, sigma::Float64,
+    check_iter::Int, sigma::Float64, debug_info::Bool=false
 )
     # adaptive restart
     if restart_info.first_restart
@@ -620,18 +627,34 @@ function check_restart(restart_info::HPRLP_restart,
             if restart_info.current_gap <= 0.2 * restart_info.last_gap
                 restart_info.sufficient += 1
                 restart_info.restart_flag = 1
+                if debug_info
+                    println("Sufficient decrease: restart at iteration ", iter,
+                        ", current_gap = ", restart_info.current_gap,
+                        ", last_gap = ", restart_info.last_gap)
+                end
             end
 
             # necessary decrease
             if (restart_info.current_gap <= 0.6 * restart_info.last_gap) && (restart_info.current_gap > 1.00 * restart_info.save_gap)
                 restart_info.necessary += 1
                 restart_info.restart_flag = 2
+                if debug_info
+                    println("Necessary decrease: restart at iteration ", iter,
+                        ", current_gap = ", restart_info.current_gap,
+                        ", last_gap = ", restart_info.last_gap,
+                        ", save_gap = ", restart_info.save_gap)
+                end
             end
 
             # long iterations
             if restart_info.inner >= 0.2 * iter
                 restart_info.long += 1
                 restart_info.restart_flag = 3
+                if debug_info
+                    println("Long iterations: restart at iteration ", iter,
+                        ", inner = ", restart_info.inner,
+                        ", iter = ", iter)
+                end
             end
 
             if restart_info.best_gap > restart_info.current_gap
@@ -1013,6 +1036,7 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     ws.saved_state = HPRLP_saved_state_gpu()
     ws.saved_state.save_x = CUDA.zeros(Float64, n)
     ws.saved_state.save_y = CUDA.zeros(Float64, m)
+    ws.saved_state.save_z = CUDA.zeros(Float64, n)
     ws.saved_state.save_sigma = ws.sigma
     ws.saved_state.save_iter = 0
     ws.saved_state.save_err_Rp = Inf
@@ -1104,6 +1128,7 @@ function allocate_workspace_cpu(lp::LP_info_cpu, scaling_info::Scaling_info_cpu,
     ws.saved_state = HPRLP_saved_state_cpu()
     ws.saved_state.save_x = Vector(zeros(n))
     ws.saved_state.save_y = Vector(zeros(m))
+    ws.saved_state.save_z = Vector(zeros(n))
     ws.saved_state.save_sigma = ws.sigma
     ws.saved_state.save_iter = 0
     ws.saved_state.save_err_Rp = Inf
@@ -1117,13 +1142,6 @@ end
 
 # the function to save current state to HDF5 file
 # This function is called whenever the log is printed (if auto_save is enabled)
-# It saves:
-#   - Current solution (x_bar, y_bar) - scaled to original problem
-#   - Best solution so far (save_x, save_y) - scaled to original problem
-#   - Current and best sigma values
-#   - Current and best residuals, objectives, and iteration numbers
-#   - Current iteration number and elapsed time
-#   - All solver parameters including initial solutions
 function save_state_to_hdf5(
     filename::String,
     ws::Union{HPRLP_workspace_gpu,HPRLP_workspace_cpu},
@@ -1132,20 +1150,39 @@ function save_state_to_hdf5(
     params::HPRLP_parameters,
     iter::Int,
     t_start_alg::Float64,
+    restart_info::HPRLP_restart,
+    power_time::Float64,
+    tolerance_times::Vector{Float64},
+    tolerance_iters::Vector{Int},
+    tolerance_reached::BitVector,
 )
     # Convert GPU arrays to CPU if needed
     if ws isa HPRLP_workspace_gpu
+        x = Vector(ws.x)
+        y = Vector(ws.y)
         x_bar = Vector(ws.x_bar)
         y_bar = Vector(ws.y_bar)
+        y_obj = Vector(ws.y_obj)
+        z_bar = Vector(ws.z_bar)
+        last_x = Vector(ws.last_x)
+        last_y = Vector(ws.last_y)
         save_x = Vector(ws.saved_state.save_x)
         save_y = Vector(ws.saved_state.save_y)
+        save_z = Vector(ws.saved_state.save_z)
         col_norm = Vector(sc.col_norm)
         row_norm = Vector(sc.row_norm)
     else
+        x = copy(ws.x)
+        y = copy(ws.y)
         x_bar = ws.x_bar
         y_bar = ws.y_bar
+        y_obj = ws.y_obj
+        z_bar = ws.z_bar
+        last_x = ws.last_x
+        last_y = ws.last_y
         save_x = ws.saved_state.save_x
         save_y = ws.saved_state.save_y
+        save_z = ws.saved_state.save_z
         col_norm = sc.col_norm
         row_norm = sc.row_norm
     end
@@ -1153,8 +1190,10 @@ function save_state_to_hdf5(
     # Scale the variables (same as in collect_results)
     x_bar_scaled = sc.b_scale * (x_bar ./ col_norm)
     y_bar_scaled = sc.c_scale * (y_bar ./ row_norm)
+    z_bar_scaled = sc.c_scale * (z_bar .* col_norm)
     save_x_scaled = sc.b_scale * (save_x ./ col_norm)
     save_y_scaled = sc.c_scale * (save_y ./ row_norm)
+    save_z_scaled = sc.c_scale * (save_z .* col_norm)
 
     # Create or open HDF5 file
     if isfile(filename)
@@ -1169,6 +1208,7 @@ function save_state_to_hdf5(
         # Save current solution (scaled)
         file["current/x_org"] = x_bar_scaled
         file["current/y_org"] = y_bar_scaled
+        file["current/z_org"] = z_bar_scaled
         file["current/sigma"] = ws.sigma
 
         # Save current residuals
@@ -1181,6 +1221,7 @@ function save_state_to_hdf5(
         # Save best solution so far (scaled)
         file["best/x_org"] = save_x_scaled
         file["best/y_org"] = save_y_scaled
+        file["best/z_org"] = save_z_scaled
         file["best/sigma"] = ws.saved_state.save_sigma
         file["best/iteration"] = ws.saved_state.save_iter
 
@@ -1190,6 +1231,54 @@ function save_state_to_hdf5(
         file["best/primal_obj"] = ws.saved_state.save_primal_obj
         file["best/dual_obj"] = ws.saved_state.save_dual_obj
         file["best/rel_gap"] = ws.saved_state.save_rel_gap
+
+        # Save internal state needed for exact resume at this save point.
+        file["resume/format_version"] = 1
+        file["resume/iteration"] = iter
+        file["resume/elapsed_time"] = time() - t_start_alg
+        file["resume/power_time"] = power_time
+        file["resume/x"] = x
+        file["resume/y"] = y
+        file["resume/x_bar"] = x_bar
+        file["resume/y_bar"] = y_bar
+        file["resume/y_obj"] = y_obj
+        file["resume/z_bar"] = z_bar
+        file["resume/last_x"] = last_x
+        file["resume/last_y"] = last_y
+        file["resume/sigma"] = ws.sigma
+        file["resume/lambda_max"] = ws.lambda_max
+        file["resume/to_check"] = ws.to_check
+        file["resume/residuals/err_Rp"] = residuals.err_Rp_org_bar
+        file["resume/residuals/err_Rd"] = residuals.err_Rd_org_bar
+        file["resume/residuals/primal_obj"] = residuals.primal_obj_bar
+        file["resume/residuals/dual_obj"] = residuals.dual_obj_bar
+        file["resume/residuals/rel_gap"] = residuals.rel_gap_bar
+        file["resume/residuals/kkt"] = residuals.KKTx_and_gap_org_bar
+        file["resume/restart/restart_flag"] = restart_info.restart_flag
+        file["resume/restart/first_restart"] = restart_info.first_restart
+        file["resume/restart/last_gap"] = restart_info.last_gap
+        file["resume/restart/current_gap"] = restart_info.current_gap
+        file["resume/restart/save_gap"] = restart_info.save_gap
+        file["resume/restart/best_gap"] = restart_info.best_gap
+        file["resume/restart/best_sigma"] = restart_info.best_sigma
+        file["resume/restart/inner"] = restart_info.inner
+        file["resume/restart/sufficient"] = restart_info.sufficient
+        file["resume/restart/necessary"] = restart_info.necessary
+        file["resume/restart/long"] = restart_info.long
+        file["resume/restart/times"] = restart_info.times
+        file["resume/tolerance/times"] = tolerance_times
+        file["resume/tolerance/iters"] = tolerance_iters
+        file["resume/tolerance/reached"] = Vector{Bool}(tolerance_reached)
+        file["resume/best/x"] = save_x
+        file["resume/best/y"] = save_y
+        file["resume/best/z"] = save_z
+        file["resume/best/sigma"] = ws.saved_state.save_sigma
+        file["resume/best/iteration"] = ws.saved_state.save_iter
+        file["resume/best/err_Rp"] = ws.saved_state.save_err_Rp
+        file["resume/best/err_Rd"] = ws.saved_state.save_err_Rd
+        file["resume/best/primal_obj"] = ws.saved_state.save_primal_obj
+        file["resume/best/dual_obj"] = ws.saved_state.save_dual_obj
+        file["resume/best/rel_gap"] = ws.saved_state.save_rel_gap
 
         # Save parameters
         file["parameters/stoptol"] = params.stoptol
@@ -1216,6 +1305,118 @@ function save_state_to_hdf5(
             file["parameters/initial_y"] = params.initial_y
         end
     end
+end
+
+function _read_h5_scalar(file, path::String)
+    value = read(file, path)
+    return value isa AbstractArray ? value[] : value
+end
+
+function _read_h5_bool(file, path::String)
+    return Bool(_read_h5_scalar(file, path))
+end
+
+function _copy_resume_vector!(dest::AbstractVector{Float64}, values::Vector{Float64}, name::String)
+    length(dest) == length(values) || throw(DimensionMismatch("Autosave resume dataset $(name) has length $(length(values)); expected $(length(dest))."))
+    dest .= values
+    return nothing
+end
+
+function _copy_resume_vector!(dest::CuVector{Float64}, values::Vector{Float64}, name::String)
+    length(dest) == length(values) || throw(DimensionMismatch("Autosave resume dataset $(name) has length $(length(values)); expected $(length(dest))."))
+    dest .= CuArray(values)
+    return nothing
+end
+
+@inline function set_halpern_runtime_from_restart!(ws::HPRLP_workspace_gpu, restart_info::HPRLP_restart)
+    fact1 = 1.0 / (restart_info.inner + 2.0)
+    copyto!(ws.halpern_inner, Int64[restart_info.inner])
+    copyto!(ws.halpern_factors, [fact1, 1.0 - fact1])
+    return nothing
+end
+
+function restore_state_from_hdf5!(
+    filename::String,
+    ws::Union{HPRLP_workspace_gpu,HPRLP_workspace_cpu},
+    residuals::HPRLP_residuals,
+    restart_info::HPRLP_restart,
+)
+    isfile(filename) || throw(ArgumentError("Autosave file not found: $(filename)"))
+    resume_iter = 0
+    resume_elapsed_time = 0.0
+    resume_power_time = 0.0
+    tolerance_times = zeros(Float64, 3)
+    tolerance_iters = zeros(Int, 3)
+    tolerance_reached = falses(3)
+
+    h5open(filename, "r") do file
+        haskey(file, "resume/format_version") || throw(ArgumentError("Autosave file $(filename) does not contain resume state. Run again with the updated auto_save format."))
+        resume_iter = Int(_read_h5_scalar(file, "resume/iteration"))
+        resume_elapsed_time = Float64(_read_h5_scalar(file, "resume/elapsed_time"))
+        resume_power_time = Float64(_read_h5_scalar(file, "resume/power_time"))
+
+        _copy_resume_vector!(ws.x, read(file, "resume/x"), "resume/x")
+        _copy_resume_vector!(ws.y, read(file, "resume/y"), "resume/y")
+        _copy_resume_vector!(ws.x_bar, read(file, "resume/x_bar"), "resume/x_bar")
+        _copy_resume_vector!(ws.y_bar, read(file, "resume/y_bar"), "resume/y_bar")
+        _copy_resume_vector!(ws.y_obj, read(file, "resume/y_obj"), "resume/y_obj")
+        _copy_resume_vector!(ws.z_bar, read(file, "resume/z_bar"), "resume/z_bar")
+        _copy_resume_vector!(ws.last_x, read(file, "resume/last_x"), "resume/last_x")
+        _copy_resume_vector!(ws.last_y, read(file, "resume/last_y"), "resume/last_y")
+
+        ws.sigma = Float64(_read_h5_scalar(file, "resume/sigma"))
+        ws.lambda_max = Float64(_read_h5_scalar(file, "resume/lambda_max"))
+        ws.to_check = _read_h5_bool(file, "resume/to_check")
+
+        residuals.err_Rp_org_bar = Float64(_read_h5_scalar(file, "resume/residuals/err_Rp"))
+        residuals.err_Rd_org_bar = Float64(_read_h5_scalar(file, "resume/residuals/err_Rd"))
+        residuals.primal_obj_bar = Float64(_read_h5_scalar(file, "resume/residuals/primal_obj"))
+        residuals.dual_obj_bar = Float64(_read_h5_scalar(file, "resume/residuals/dual_obj"))
+        residuals.rel_gap_bar = Float64(_read_h5_scalar(file, "resume/residuals/rel_gap"))
+        residuals.KKTx_and_gap_org_bar = Float64(_read_h5_scalar(file, "resume/residuals/kkt"))
+
+        restart_info.restart_flag = Int(_read_h5_scalar(file, "resume/restart/restart_flag"))
+        restart_info.first_restart = _read_h5_bool(file, "resume/restart/first_restart")
+        restart_info.last_gap = Float64(_read_h5_scalar(file, "resume/restart/last_gap"))
+        restart_info.current_gap = Float64(_read_h5_scalar(file, "resume/restart/current_gap"))
+        restart_info.save_gap = Float64(_read_h5_scalar(file, "resume/restart/save_gap"))
+        restart_info.best_gap = Float64(_read_h5_scalar(file, "resume/restart/best_gap"))
+        restart_info.best_sigma = Float64(_read_h5_scalar(file, "resume/restart/best_sigma"))
+        restart_info.inner = Int(_read_h5_scalar(file, "resume/restart/inner"))
+        restart_info.sufficient = Int(_read_h5_scalar(file, "resume/restart/sufficient"))
+        restart_info.necessary = Int(_read_h5_scalar(file, "resume/restart/necessary"))
+        restart_info.long = Int(_read_h5_scalar(file, "resume/restart/long"))
+        restart_info.times = Int(_read_h5_scalar(file, "resume/restart/times"))
+
+        _copy_resume_vector!(ws.saved_state.save_x, read(file, "resume/best/x"), "resume/best/x")
+        _copy_resume_vector!(ws.saved_state.save_y, read(file, "resume/best/y"), "resume/best/y")
+        _copy_resume_vector!(ws.saved_state.save_z, read(file, "resume/best/z"), "resume/best/z")
+        ws.saved_state.save_sigma = Float64(_read_h5_scalar(file, "resume/best/sigma"))
+        ws.saved_state.save_iter = Int(_read_h5_scalar(file, "resume/best/iteration"))
+        ws.saved_state.save_err_Rp = Float64(_read_h5_scalar(file, "resume/best/err_Rp"))
+        ws.saved_state.save_err_Rd = Float64(_read_h5_scalar(file, "resume/best/err_Rd"))
+        ws.saved_state.save_primal_obj = Float64(_read_h5_scalar(file, "resume/best/primal_obj"))
+        ws.saved_state.save_dual_obj = Float64(_read_h5_scalar(file, "resume/best/dual_obj"))
+        ws.saved_state.save_rel_gap = Float64(_read_h5_scalar(file, "resume/best/rel_gap"))
+
+        tolerance_times .= read(file, "resume/tolerance/times")
+        tolerance_iters .= Int.(read(file, "resume/tolerance/iters"))
+        tolerance_reached .= Bool.(read(file, "resume/tolerance/reached"))
+    end
+
+    if ws isa HPRLP_workspace_gpu
+        set_halpern_runtime_from_restart!(ws, restart_info)
+        CUDA.synchronize()
+    end
+
+    return (
+        iter=resume_iter,
+        elapsed_time=resume_elapsed_time,
+        power_time=resume_power_time,
+        tolerance_times=tolerance_times,
+        tolerance_iters=tolerance_iters,
+        tolerance_reached=tolerance_reached,
+    )
 end
 
 # the function to initialize the restart information
@@ -1637,8 +1838,8 @@ end
 end
 
 # Helper function to print iteration log
-function print_iteration_log(iter::Int, residuals::HPRLP_residuals, sigma::Float64, t_start_alg::Float64)
-    println(@sprintf("%5.0f    %3.2e    %3.2e    %+7.6e    %+7.6e    %3.2e    %3.2e    %6.2f",
+function print_iteration_log(iter::Int, residuals::HPRLP_residuals, sigma::Float64, t_start_alg::Float64, restart_info::HPRLP_restart)
+    println(@sprintf("%5.0f    %3.2e    %3.2e    %+7.6e    %+7.6e    %3.2e    | %3.2e    %3.2e    %3.2e    %3.2e | %6.2f",
         iter,
         residuals.err_Rp_org_bar,
         residuals.err_Rd_org_bar,
@@ -1646,6 +1847,9 @@ function print_iteration_log(iter::Int, residuals::HPRLP_residuals, sigma::Float
         residuals.dual_obj_bar,
         residuals.rel_gap_bar,
         sigma,
+        residuals.err_Rp_abs,
+        residuals.err_Rd_abs,
+        isinf(restart_info.current_gap) ? 0.0 : restart_info.current_gap,
         time() - t_start_alg))
 end
 
@@ -1696,11 +1900,25 @@ function compute_maximum_eigenvalue!(lp::Union{LP_info_gpu,LP_info_cpu},
     return power_time
 end
 
-function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing)
+function copy_lp_model(model::LP_info_cpu)
+    return LP_info_cpu(
+        copy(model.A),
+        copy(model.AT),
+        copy(model.c),
+        copy(model.AL),
+        copy(model.AU),
+        copy(model.l),
+        copy(model.u),
+        model.obj_constant,
+    )
+end
+
+function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_params=nothing, resume_filename=nothing)
     presolve_backend = normalize_presolve_backend(params.presolve)
     params.presolve = presolve_backend
     presolve_state = nothing
     original_model = model
+    model = copy_lp_model(model)
     presolve_elapsed = 0.0
 
     if params.use_gpu
@@ -1756,12 +1974,15 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
         # Create a copy of the model for warmup
         warmup_model = deepcopy(model)
 
-        # Run warmup solve
+        # Run warmup solve without touching the autosave file for the main run.
+        original_auto_save = params.auto_save
+        params.auto_save = false
         solve(warmup_model, params)
 
         # Restore original parameters
         params.max_iter = original_max_iter
         params.verbose = original_verbose
+        params.auto_save = original_auto_save
 
         warmup_time = time() - t_start_warmup
         if params.verbose
@@ -1779,7 +2000,7 @@ function _optimize_impl(model::LP_info_cpu, params::HPRLP_parameters; presolve_p
     end
 
     setup_start = time()
-    results = solve(model, params)
+    results = solve(model, params; resume_filename=resume_filename)
     setup_time = time() - setup_start - results.time
 
     if params.verbose
@@ -1851,6 +2072,10 @@ function optimize(
     return _optimize_impl(model, params; presolve_params=presolve_params)
 end
 
+function optimize_from_autosave(model::LP_info_cpu, params::HPRLP_parameters; filename::String=params.save_filename, presolve_params=nothing)
+    return _optimize_impl(model, params; presolve_params=presolve_params, resume_filename=filename)
+end
+
 """
     solve(model::LP_info_cpu, params::HPRLP_parameters)
 
@@ -1880,7 +2105,7 @@ result = solve(model, params)
 
 See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
+function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; resume_filename=nothing)
     if size(model.A, 1) == 0 && size(model.A, 2) == 0
         if params.verbose
             println("Reduced model is empty after presolve; treating it as solved without entering the main algorithm.")
@@ -1917,7 +2142,7 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
 
 
     if params.verbose
-        println(" iter     errRp        errRd         p_obj            d_obj          gap         sigma       time")
+        println(" iter      Rp_r        Rd_r          p_obj            d_obj          gap       |  sigma        Rp_a        Rd_a       M_norm  |   time")
     end
 
     # Track when tolerance thresholds are reached
@@ -1925,6 +2150,20 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
     tolerance_times = zeros(Float64, length(tolerance_levels))
     tolerance_iters = zeros(Int, length(tolerance_levels))
     tolerance_reached = falses(length(tolerance_levels))
+
+    start_iter = 0
+    if resume_filename !== nothing
+        resume_state = restore_state_from_hdf5!(String(resume_filename), ws, residuals, restart_info)
+        start_iter = resume_state.iter
+        power_time = resume_state.power_time
+        tolerance_times .= resume_state.tolerance_times
+        tolerance_iters .= resume_state.tolerance_iters
+        tolerance_reached .= resume_state.tolerance_reached
+        t_start_alg = time() - resume_state.elapsed_time
+        if params.verbose
+            println("Resuming from autosave at iteration ", start_iter)
+        end
+    end
 
     # Select GPU or CPU function implementations
     compute_residuals!, update_sigma!, collect_results!, update_x_z_check!, update_x_z_normal!, update_y_check!, update_y_normal!, compute_weighted_norm! =
@@ -1939,7 +2178,7 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
     elapsed_time = 0.0
 
     # Main iteration loop
-    for iter = 0:params.max_iter
+    for iter = start_iter:params.max_iter
         periodic_check = rem(iter, params.check_iter) == 0
 
         # Determine if log should be printed
@@ -1952,7 +2191,7 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
 
         # Compute residuals
         if periodic_check
-            compute_gap_now = params.use_gpu && iter > 0 && periodic_check
+            compute_gap_now = params.use_gpu && iter > start_iter && iter > 0 && periodic_check
             compute_residuals!(ws, lp, scaling_info, residuals, iter, params, restart_info, compute_gap_now)
             residuals_refreshed = true
         elseif print_yes
@@ -1970,28 +2209,29 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
         end
         status = check_break(residuals, iter, elapsed_time, params)
 
-        # Check restart conditions
-        restart_info.restart_flag = 0
-        if periodic_check
-            check_restart(restart_info, iter, params.check_iter, ws.sigma)
-        end
-
         # Print iteration log
         if print_yes || (status != "CONTINUE")
             if params.verbose
-                print_iteration_log(iter, residuals, ws.sigma, t_start_alg)
+                print_iteration_log(iter, residuals, ws.sigma, t_start_alg, restart_info)
             end
 
             # Save to HDF5 if auto_save is enabled
             if params.auto_save
                 try
-                    save_state_to_hdf5(params.save_filename, ws, scaling_info, residuals, params, iter, t_start_alg)
+                    save_state_to_hdf5(params.save_filename, ws, scaling_info, residuals, params, iter, t_start_alg,
+                        restart_info, power_time, tolerance_times, tolerance_iters, tolerance_reached)
                 catch e
                     if params.verbose
                         println("Warning: Failed to save to HDF5 file: ", e)
                     end
                 end
             end
+        end
+
+        # Check restart conditions after saving so a resumed run can recompute this iteration's decision.
+        restart_info.restart_flag = 0
+        if periodic_check
+            check_restart(restart_info, iter, params.check_iter, ws.sigma, params.debug_restart)
         end
 
         # Check and record tolerance thresholds
@@ -2028,7 +2268,7 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters)
         do_restart!(restart_info, ws)
 
         # Rebuild Graph if restarted
-        if params.use_gpu && (iter == 0 || restart_info.restart_flag > 0)
+        if params.use_gpu && (iter == start_iter || restart_info.restart_flag > 0 || graph_exec === nothing)
             graph = CUDA.capture() do
                 update_x_z_normal_gpu!(ws)
                 update_y_normal_gpu!(ws)

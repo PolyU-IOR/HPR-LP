@@ -146,10 +146,15 @@ optimize!(model)
 using HDF5
 
 h5open("best_solution.h5", "r") do file
-    x_best = read(file, "x")
-    y_best = read(file, "y")
-    println("Best solution found at iteration: ", read(file, "iter"))
+    x_best = read(file, "best/x_org")
+    y_best = read(file, "best/y_org")
+    println("Best solution found at iteration: ", read(file, "best/iteration"))
 end
+```
+
+```julia
+params.max_iter = 200000
+result = optimize_from_autosave(model, params; filename="best_solution.h5")
 ```
 
 

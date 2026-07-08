@@ -150,6 +150,8 @@ const SUPPORTED_PARAMETERS = (
     "warm_up",
     "print_frequency",
     "verbose",
+    "auto_save",
+    "save_filename",
     "presolve",
     "use_presolve",
 )
@@ -188,6 +190,10 @@ function MOI.set(model::Optimizer, param::MOI.RawOptimizerAttribute, value)
         model.params.print_frequency = Int(value)
     elseif name == "verbose"
         model.params.verbose = Bool(value)
+    elseif name == "auto_save"
+        model.params.auto_save = Bool(value)
+    elseif name == "save_filename"
+        model.params.save_filename = String(value)
     elseif name == "presolve"
         set_presolve_backend!(model.params, value)
     elseif name == "use_presolve"
@@ -228,6 +234,10 @@ function MOI.get(model::Optimizer, param::MOI.RawOptimizerAttribute)
         return model.params.print_frequency
     elseif name == "verbose"
         return model.params.verbose
+    elseif name == "auto_save"
+        return model.params.auto_save
+    elseif name == "save_filename"
+        return model.params.save_filename
     elseif name == "presolve"
         return String(model.params.presolve)
     elseif name == "use_presolve"

@@ -221,7 +221,7 @@ params.auto_save = true
 ### `save_filename::String`
 **Default:** `"hprlp_autosave.h5"`
 
-Filename for the HDF5 file used by auto-save.
+Filename for the HDF5 file used by auto-save. The file stores both public solution snapshots under `current/` and `best/`, and internal resume data under `resume/`.
 
 ```julia
 params.save_filename = "my_problem.h5"
@@ -263,6 +263,16 @@ params.auto_save = true
 params.save_filename = "backup.h5"
 params.initial_x = x0
 ```
+
+### Resume From Auto-Save
+```julia
+params = HPRLP_parameters()
+params.save_filename = "backup.h5"
+params.max_iter = 200000
+result = optimize_from_autosave(model, params; filename=params.save_filename)
+```
+
+Use the same model and scaling-related parameters that produced the autosave file.
 
 ### Debugging/Analysis
 ```julia

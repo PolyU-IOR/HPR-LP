@@ -37,7 +37,7 @@ export Optimizer
 
 # Export main functions and types for direct API usage
 export HPRLP_parameters, HPRLP_results
-export build_from_Abc, optimize
+export build_from_Abc, optimize, optimize_from_autosave
 export BatchedSharedMatrix_gpu, BatchedLPData_gpu, BatchedScalingInfo_gpu, BatchedWorkspace_gpu, BatchedHPRLPResults
 export build_batched_shared_matrix_gpu, build_batched_lp_gpu, prepare_batched_gpu_problem, optimize_batched_gpu
 export allocate_batched_workspace_gpu, batched_spmm_A!, batched_spmm_AT!, batched_spmm_pair!

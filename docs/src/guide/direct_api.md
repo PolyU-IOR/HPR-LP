@@ -156,8 +156,14 @@ params.save_filename = "my_optimization.h5"
 result = optimize(model, params)
 ```
 
-Useful for long optimizations that might be interrupted or reach time limits.
+The autosave file also contains the internal solver state needed for an exact continuation. To continue from that save point, keep the same model and scaling settings and call:
+
+```julia
+params.max_iter = 200000
+result = optimize_from_autosave(model, params; filename="my_optimization.h5")
 ```
+
+The resumed solve keeps the saved iteration number and continues logging on the same iteration scale.
 
 ## See Also
 

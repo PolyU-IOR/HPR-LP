@@ -568,5 +568,26 @@ ENDATA
             
             rm(test_h5_file)
         end
+
+        @testset "Resume from autosave reuses model" begin
+            isfile(test_h5_file) && rm(test_h5_file)
+
+            params = make_test_params()
+            params.auto_save = true
+            params.save_filename = test_h5_file
+            params.print_frequency = 10
+            params.stoptol = 1e-8
+
+            model = HPRLP.build_from_Abc(A, c, AL, AU, l, u, obj_constant)
+            result = HPRLP.optimize(model, params)
+            resumed = HPRLP.optimize_from_autosave(model, params; filename=test_h5_file)
+
+            @test result.status == "OPTIMAL"
+            @test resumed.status == "OPTIMAL"
+            @test resumed.iter == result.iter
+            @test isapprox(resumed.primal_obj, result.primal_obj, atol=1e-8)
+
+            rm(test_h5_file)
+        end
     end
 end
