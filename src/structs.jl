@@ -118,8 +118,10 @@ mutable struct HPRLP_parameters
 
     debug_restart::Bool
 
+    debug_sigma::Bool
+
     # Default constructor
-    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false, false)
+    HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false, false, false)
 end
 
 """

@@ -426,8 +426,8 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     res.err_Rd_org_bar = sc.c_scale * reduction_scalars_host[4] / sc.norm_c_org
     res.err_Rp_org_bar = sc.b_scale * reduction_scalars_host[5] / sc.norm_b_org
 
-    res.err_Rd_abs = reduction_scalars_host[4]
-    res.err_Rp_abs = reduction_scalars_host[5]
+    res.err_Rd_abs = sc.c_scale * reduction_scalars_host[4]
+    res.err_Rp_abs = sc.b_scale * reduction_scalars_host[5]
 
     if iter == 0
         res.err_Rp_org_bar = max(res.err_Rp_org_bar, sc.b_scale * CUDA.norm(ws.dx))
@@ -453,9 +453,9 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     # Save best values if auto_save is enabled
     if params.auto_save
         if iter == 0 || res.KKTx_and_gap_org_bar < max(ws.saved_state.save_err_Rp, ws.saved_state.save_err_Rd, ws.saved_state.save_rel_gap)
-            ws.saved_state.save_x .= ws.x_bar
-            ws.saved_state.save_y .= ws.y_bar
-            ws.saved_state.save_z .= ws.z_bar
+            ws.saved_state.save_x = ws.x_bar
+            ws.saved_state.save_y = ws.y_bar
+            ws.saved_state.save_z = ws.z_bar
             ws.saved_state.save_sigma = ws.sigma
             ws.saved_state.save_iter = iter
             ws.saved_state.save_err_Rp = res.err_Rp_org_bar
@@ -537,12 +537,22 @@ function update_sigma_gpu!(
     restart_info::HPRLP_restart,
     ws::HPRLP_workspace_gpu,
     residuals::HPRLP_residuals,
+    debug_info::Bool=false,
 )
     if restart_info.restart_flag >= 1 && restart_info.restart_flag <= 3
         # Movement norms are populated during periodic compute_residuals_gpu!.
         compute_restart_movement_norms_gpu!(ws)
         primal_move = ws.reduction_scalars_host[9]
         dual_move = ws.reduction_scalars_host[10]
+        if debug_info
+            println("Primal move: ", primal_move, ", Dual move: ", dual_move)
+            # print l_inf norm of ws.dx and ws.dy
+            println("l_inf norm of primal move: ", maximum(abs.(ws.dx)))
+            println("l_inf norm of dual move: ", maximum(abs.(ws.dy)))
+            # print how many zeros in ws.dx and ws.dy
+            println("Number of zeros in primal move: ", count(x -> abs(x) < 1e-12, ws.dx))
+            println("Number of zeros in dual move: ", count(y -> abs(y) < 1e-12, ws.dy))
+        end
         if primal_move > 1e-16 && dual_move > 1e-16 &&
            primal_move < 1e12 && dual_move < 1e12
             pm_over_dm = primal_move / dual_move
@@ -677,6 +687,7 @@ function do_restart!(restart_info::HPRLP_restart, ws::Union{HPRLP_workspace_gpu,
         restart_info.times += 1
         restart_info.inner = 0
         restart_info.save_gap = Inf
+        restart_info.last_gap = restart_info.current_gap
     end
 end
 
@@ -2199,9 +2210,9 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; 
             residuals_refreshed = true
         end
 
-        if params.use_gpu && ws.pending_last_gap && periodic_check
-            consume_pending_last_gap_gpu!(ws, restart_info)
-        end
+        # if params.use_gpu && ws.pending_last_gap && periodic_check
+        #     consume_pending_last_gap_gpu!(ws, restart_info)
+        # end
 
         # Check termination conditions (cache wall-clock checks to reduce host overhead)
         if (iter & 31) == 0 || print_yes
@@ -2213,18 +2224,6 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; 
         if print_yes || (status != "CONTINUE")
             if params.verbose
                 print_iteration_log(iter, residuals, ws.sigma, t_start_alg, restart_info)
-            end
-
-            # Save to HDF5 if auto_save is enabled
-            if params.auto_save
-                try
-                    save_state_to_hdf5(params.save_filename, ws, scaling_info, residuals, params, iter, t_start_alg,
-                        restart_info, power_time, tolerance_times, tolerance_iters, tolerance_reached)
-                catch e
-                    if params.verbose
-                        println("Warning: Failed to save to HDF5 file: ", e)
-                    end
-                end
             end
         end
 
@@ -2242,6 +2241,18 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; 
 
         # Collect results and return if terminated
         if status != "CONTINUE"
+            # Save to HDF5 if auto_save is enabled
+            if params.auto_save
+                try
+                    save_state_to_hdf5(params.save_filename, ws, scaling_info, residuals, params, iter, t_start_alg,
+                        restart_info, power_time, tolerance_times, tolerance_iters, tolerance_reached)
+                catch e
+                    if params.verbose
+                        println("Warning: Failed to save to HDF5 file: ", e)
+                    end
+                end
+            end
+
             if params.verbose
                 println("\n", "="^80)
                 println("SOLUTION SUMMARY")
@@ -2262,7 +2273,9 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; 
         end
 
         # Update sigma
-        update_sigma!(restart_info, ws, residuals)
+        if iter > 15000 || restart_info.restart_flag < 3
+            # update_sigma!(restart_info, ws, residuals, params.debug_sigma)
+        end
 
         # Restart if needed
         do_restart!(restart_info, ws)
@@ -2313,7 +2326,7 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; 
         end
         if restart_info.restart_flag > 0
             if params.use_gpu
-                queue_pending_last_gap_gpu!(ws)
+                # queue_pending_last_gap_gpu!(ws)
                 # restart_info.last_gap = compute_weighted_norm!(ws)
             else
                 restart_info.last_gap = compute_weighted_norm!(ws)
