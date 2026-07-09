@@ -518,9 +518,9 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
     # Save best values if auto_save is enabled
     if params.auto_save
         if iter == 0 || res.KKTx_and_gap_org_bar < max(ws.saved_state.save_err_Rp, ws.saved_state.save_err_Rd, ws.saved_state.save_rel_gap)
-            ws.saved_state.save_x .= ws.x_bar
-            ws.saved_state.save_y .= ws.y_bar
-            ws.saved_state.save_z .= ws.z_bar
+            ws.saved_state.save_x = ws.x_bar
+            ws.saved_state.save_y = ws.y_bar
+            ws.saved_state.save_z = ws.z_bar
             ws.saved_state.save_sigma = ws.sigma
             ws.saved_state.save_iter = iter
             ws.saved_state.save_err_Rp = res.err_Rp_org_bar
@@ -582,12 +582,22 @@ function update_sigma_cpu!(
     restart_info::HPRLP_restart,
     ws::HPRLP_workspace_cpu,
     residuals::HPRLP_residuals,
+    debug_info::Bool=false,
 )
     if restart_info.restart_flag >= 1 && restart_info.restart_flag <= 3
         ws.dx .= ws.x_bar .- ws.last_x
         ws.dy .= ws.y_bar .- ws.last_y
         primal_move = norm(ws.dx)
         dual_move = norm(ws.dy)
+        if debug_info
+            println("Primal move: ", primal_move, ", Dual move: ", dual_move)
+            # print l_inf norm of ws.dx and ws.dy
+            println("l_inf norm of primal move: ", maximum(abs.(ws.dx)))
+            println("l_inf norm of dual move: ", maximum(abs.(ws.dy)))
+            # print how many zeros in ws.dx and ws.dy
+            println("Number of zeros in primal move: ", count(x -> abs(x) < 1e-12, ws.dx))
+            println("Number of zeros in dual move: ", count(y -> abs(y) < 1e-12, ws.dy))
+        end
         if primal_move > 1e-16 && dual_move > 1e-16 &&
            primal_move < 1e12 && dual_move < 1e12
             pm_over_dm = primal_move / dual_move
@@ -625,6 +635,7 @@ function check_restart(restart_info::HPRLP_restart,
             restart_info.restart_flag = 1
             restart_info.best_gap = restart_info.current_gap
             restart_info.best_sigma = sigma
+            restart_info.last_gap = restart_info.current_gap
         end
     else
         if rem(iter, check_iter) == 0
@@ -2210,9 +2221,9 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; 
             residuals_refreshed = true
         end
 
-        # if params.use_gpu && ws.pending_last_gap && periodic_check
-        #     consume_pending_last_gap_gpu!(ws, restart_info)
-        # end
+        if params.use_gpu && ws.pending_last_gap && periodic_check
+            consume_pending_last_gap_gpu!(ws, restart_info)
+        end
 
         # Check termination conditions (cache wall-clock checks to reduce host overhead)
         if (iter & 31) == 0 || print_yes
@@ -2273,9 +2284,7 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; 
         end
 
         # Update sigma
-        if iter > 15000 || restart_info.restart_flag < 3
-            # update_sigma!(restart_info, ws, residuals, params.debug_sigma)
-        end
+        update_sigma!(restart_info, ws, residuals, params.debug_sigma)
 
         # Restart if needed
         do_restart!(restart_info, ws)
@@ -2326,7 +2335,7 @@ function solve(model::Union{LP_info_cpu,LP_info_gpu}, params::HPRLP_parameters; 
         end
         if restart_info.restart_flag > 0
             if params.use_gpu
-                # queue_pending_last_gap_gpu!(ws)
+                queue_pending_last_gap_gpu!(ws)
                 # restart_info.last_gap = compute_weighted_norm!(ws)
             else
                 restart_info.last_gap = compute_weighted_norm!(ws)

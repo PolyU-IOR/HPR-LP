@@ -72,6 +72,50 @@ ENDATA
             isfile(path) && rm(path)
         end
     end
+
+    @testset "LP HDF5 Cache Round Trip" begin
+        mps_file = joinpath(@__DIR__, "..", "model.mps")
+
+        if isfile(mps_file)
+            h5_file = tempname() * ".h5"
+            try
+                original = HPRLP.build_from_mps(mps_file, false)
+                @test HPRLP.save_mps_as_hdf5(mps_file, h5_file; verbose=false) == h5_file
+
+                cached = HPRLP.read_from_hdf5(h5_file; verbose=false)
+                @test cached.A == original.A
+                @test cached.c == original.c
+                @test cached.AL == original.AL
+                @test cached.AU == original.AU
+                @test cached.l == original.l
+                @test cached.u == original.u
+                @test cached.obj_constant == original.obj_constant
+
+                keyword_h5_file = tempname() * ".h5"
+                try
+                    HPRLP.save_lp_to_hdf5(
+                        keyword_h5_file;
+                        A=original.A,
+                        AL=original.AL,
+                        AU=original.AU,
+                        c=original.c,
+                        l=original.l,
+                        u=original.u,
+                        obj_constant=original.obj_constant,
+                    )
+                    keyword_cached = HPRLP.read_from_h5(keyword_h5_file; verbose=false)
+                    @test keyword_cached.A == original.A
+                    @test keyword_cached.c == original.c
+                finally
+                    isfile(keyword_h5_file) && rm(keyword_h5_file)
+                end
+            finally
+                isfile(h5_file) && rm(h5_file)
+            end
+        else
+            @warn "MPS test file not found at $mps_file, skipping LP HDF5 cache test"
+        end
+    end
     
     @testset "Basic LP Problem - Direct API" begin
         # Same problem as MPS file:
