@@ -51,16 +51,8 @@ function build_from_Abc(A::Union{SparseMatrixCSC, Matrix},
         A_sparse = A
     end
 
-    # Create copies to avoid modifying the input
-    A_copy = copy(A_sparse)
-    c_copy = copy(c)
-    AL_copy = copy(AL)
-    AU_copy = copy(AU)
-    l_copy = copy(l)
-    u_copy = copy(u)
-
     # Build the LP model
-    standard_lp = formulation(A_copy, c_copy, AL_copy, AU_copy, l_copy, u_copy, obj_constant)
+    standard_lp = formulation(A_sparse, c, AL, AU, l, u, obj_constant)
 
     return standard_lp
 end
@@ -314,7 +306,7 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
             if file in namelist
                 println("The result of problem exists: ", file)
             end
-            if occursin(".mps", file) && !(file in namelist)
+            if (occursin(".mps", file) || occursin(".h5", file)) && !(file in namelist)
                 FILE_NAME = joinpath(data_path, file)
                 println(@sprintf("solving the problem %d", i), @sprintf(": %s", file))
 
@@ -327,7 +319,13 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
                         t_start_all = time()
 
                         # Build and solve the model
-                        model = build_from_mps(FILE_NAME, params.verbose)
+                        if occursin(".mps", file)
+                            model = build_from_mps(FILE_NAME, params.verbose)
+                        elseif occursin(".h5", file)
+                            model = read_from_hdf5(FILE_NAME, params.verbose)
+                        else
+                            throw(ArgumentError("Unsupported file format: $file"))
+                        end
                         results = optimize(model, params)
 
                         all_time = time() - t_start_all
