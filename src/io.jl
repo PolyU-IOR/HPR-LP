@@ -81,7 +81,7 @@ result = optimize(model, params)
 
 See also: [`build_from_Abc`](@ref), [`optimize`](@ref)
 """
-function build_from_mps(filename::AbstractString, verbose::Bool=true; mpsformat::Symbol=:auto)
+function build_from_mps(filename::AbstractString; verbose::Bool=true, mpsformat::Symbol=:auto)
     t_start = time()
     if verbose
         println("READING FILE ... ", filename)
@@ -320,9 +320,9 @@ function run_dataset(data_path::String, result_path::String, params::HPRLP_param
 
                         # Build and solve the model
                         if occursin(".mps", file)
-                            model = build_from_mps(FILE_NAME, params.verbose)
+                            model = build_from_mps(FILE_NAME; verbose=params.verbose)
                         elseif occursin(".h5", file)
-                            model = read_from_hdf5(FILE_NAME, params.verbose)
+                            model = read_from_hdf5(FILE_NAME; verbose=params.verbose)
                         else
                             throw(ArgumentError("Unsupported file format: $file"))
                         end
