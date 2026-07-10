@@ -517,10 +517,14 @@ mutable struct HPRLP_residuals
 
     err_Rp_abs::Float64
 
+    err_Rp_abs_inf::Float64
+
     # The relative residuals of the dual feasibility evaluated at y_bar and z_bar
     err_Rd_org_bar::Float64
 
     err_Rd_abs::Float64
+
+    err_Rd_abs_inf::Float64
 
     # The primal objective value evaluated at x_bar
     primal_obj_bar::Float64
