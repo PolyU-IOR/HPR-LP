@@ -432,6 +432,9 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
     res.err_Rp_abs_inf = sc.b_scale * CUDA.norm(ws.Rp, Inf)
     res.err_Rd_abs_inf = sc.c_scale * CUDA.norm(ws.Rd, Inf)
 
+    res.err_Rp_rel_inf = res.err_Rp_abs_inf / sc.norm_b_org_inf
+    res.err_Rd_rel_inf = res.err_Rd_abs_inf / sc.norm_c_org_inf
+
     if iter == 0
         res.err_Rp_org_bar = max(res.err_Rp_org_bar, sc.b_scale * CUDA.norm(ws.dx))
     end
@@ -1864,7 +1867,7 @@ end
 
 # Helper function to print iteration log
 function print_iteration_log(iter::Int, residuals::HPRLP_residuals, sigma::Float64, t_start_alg::Float64, restart_info::HPRLP_restart)
-    println(@sprintf("%5.0f    %3.2e    %3.2e    %+7.6e    %+7.6e    %3.2e    | %3.2e    %3.2e    %3.2e    %3.2e | %6.2f | %3.2e   %3.2e",
+    println(@sprintf("%5.0f    %3.2e    %3.2e    %+7.6e    %+7.6e    %3.2e    | %3.2e    %3.2e    %3.2e    %3.2e | %6.2f | %3.2e   %3.2e   %3.2e   %3.2e",
         iter,
         residuals.err_Rp_org_bar,
         residuals.err_Rd_org_bar,
@@ -1877,7 +1880,9 @@ function print_iteration_log(iter::Int, residuals::HPRLP_residuals, sigma::Float
         isinf(restart_info.current_gap) ? 0.0 : restart_info.current_gap,
         time() - t_start_alg,
         residuals.err_Rp_abs_inf,
-        residuals.err_Rd_abs_inf))
+        residuals.err_Rd_abs_inf,
+        residuals.err_Rp_rel_inf,
+        residuals.err_Rd_rel_inf))
 end
 
 # Helper function to check and record tolerance thresholds

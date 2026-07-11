@@ -517,12 +517,16 @@ mutable struct HPRLP_residuals
 
     err_Rp_abs::Float64
 
+    err_Rp_rel_inf::Float64
+
     err_Rp_abs_inf::Float64
 
     # The relative residuals of the dual feasibility evaluated at y_bar and z_bar
     err_Rd_org_bar::Float64
 
     err_Rd_abs::Float64
+
+    err_Rd_rel_inf::Float64
 
     err_Rd_abs_inf::Float64
 
@@ -639,8 +643,12 @@ mutable struct Scaling_info_cpu
     # the norm of the original vector b
     norm_b_org::Float64
 
+    norm_b_org_inf::Float64
+
     # the norm of the original vector c
     norm_c_org::Float64
+
+    norm_c_org_inf::Float64
 end
 
 # the space for the scaling information on the GPU
@@ -655,4 +663,6 @@ mutable struct Scaling_info_gpu
     norm_c::Float64
     norm_b_org::Float64
     norm_c_org::Float64
+    norm_b_org_inf::Float64
+    norm_c_org_inf::Float64
 end

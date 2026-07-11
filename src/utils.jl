@@ -296,7 +296,9 @@ function scaling!(lp::LP_info_cpu, use_Curtis_Reid_scaling::Bool, use_Ruiz_scali
     AU_nInf[lp.AU.==Inf] .= 0.0
     norm_b_org = 1 + norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
     norm_c_org = 1 + norm(lp.c)
-    scaling_info = Scaling_info_cpu(copy(lp.l), copy(lp.u), row_norm, col_norm, 1, 1, 1, 1, norm_b_org, norm_c_org)
+    norm_b_org_inf = 1 + norm(max.(abs.(AL_nInf), abs.(AU_nInf)), Inf)
+    norm_c_org_inf = 1 + norm(lp.c, Inf)
+    scaling_info = Scaling_info_cpu(copy(lp.l), copy(lp.u), row_norm, col_norm, 1, 1, 1, 1, norm_b_org, norm_c_org, norm_b_org_inf, norm_c_org_inf)
     if use_Curtis_Reid_scaling
         curtis_reid_scaling!(lp, row_norm, col_norm, CURTIS_REID_SCALING_ITERS)
     end
@@ -395,13 +397,16 @@ function scaling_gpu!(lp::LP_info_gpu, use_Curtis_Reid_scaling::Bool, use_Ruiz_s
     AU_nInf[lp.AU.==Inf] .= 0.0
     norm_b_org = 1 + CUDA.norm(max.(abs.(AL_nInf), abs.(AU_nInf)))
     norm_c_org = 1 + CUDA.norm(lp.c)
+    norm_b_org_inf = 1 + CUDA.norm(max.(abs.(AL_nInf), abs.(AU_nInf)), Inf)
+    norm_c_org_inf = 1 + CUDA.norm(lp.c, Inf)
 
     # Initialize scaling info
     scaling_info = Scaling_info_gpu(
         copy(lp.l), copy(lp.u),
         row_norm, col_norm,
         1.0, 1.0, 1.0, 1.0,
-        norm_b_org, norm_c_org
+        norm_b_org, norm_c_org,
+        norm_b_org_inf, norm_c_org_inf
     )
 
     # Get CSR matrix components
