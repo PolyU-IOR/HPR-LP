@@ -518,6 +518,8 @@ ENDATA
             
             @test result.status == "OPTIMAL"
             @test isfile(test_h5_file)
+            @test length(result.saved_state.save_z) == 2
+            @test result.saved_state.save_z isa Vector{Float64}
             
             # Read and verify HDF5 file contents
             h5open(test_h5_file, "r") do file
@@ -525,6 +527,7 @@ ENDATA
                 @test haskey(file, "current/iteration")
                 @test haskey(file, "current/x_org")
                 @test haskey(file, "current/y_org")
+                @test haskey(file, "current/z_org")
                 @test haskey(file, "current/sigma")
                 @test haskey(file, "current/primal_obj")
                 
@@ -532,12 +535,20 @@ ENDATA
                 @test haskey(file, "best/iteration")
                 @test haskey(file, "best/x_org")
                 @test haskey(file, "best/y_org")
+                @test haskey(file, "best/z_org")
                 @test haskey(file, "best/sigma")
                 
                 # Verify data
                 x_best = read(file, "best/x_org")
+                y_best = read(file, "best/y_org")
+                z_best = read(file, "best/z_org")
                 @test length(x_best) == 2
+                @test length(z_best) == 2
                 @test x_best isa Vector{Float64}
+                @test z_best isa Vector{Float64}
+                @test result.saved_state.save_x ≈ x_best
+                @test result.saved_state.save_y ≈ y_best
+                @test result.saved_state.save_z ≈ z_best
             end
             
             rm(test_h5_file)

@@ -120,6 +120,8 @@ mutable struct HPRLP_parameters
     HPRLP_parameters() = new(1e-4, typemax(Int32), 3600.0, 150, true, true, true, true, true, false, 0, true, -1, true, false, nothing, nothing, false, "hprlp_autosave.h5", "GPU", false)
 end
 
+abstract type HPRLP_saved_state end
+
 """
     HPRLP_results
 
@@ -140,6 +142,7 @@ Results from the HPR-LP solver.
 - `dual_residual::Float64`: Final dual feasibility residual
 - `relative_duality_gap::Float64`: Final relative duality gap
 - `x::Vector{Float64}`: Primal solution vector
+- `saved_state::HPRLP_saved_state`: Best iterate saved by the solver
 - `status::String`: Termination status ("OPTIMAL", "ITER_LIMIT", "TIME_LIMIT")
 
 # Example
@@ -205,6 +208,9 @@ mutable struct HPRLP_results
     # The vector z
     z::AbstractVector{Float64}
 
+    # Best iterate saved by the solver
+    saved_state::HPRLP_saved_state
+
     # Presolve / postsolve time summary
     presolve_time::Float64
     postsolve_time::Float64
@@ -260,13 +266,16 @@ mutable struct CUSPARSE_spmv_AT
 end
 
 # Define the saved state structure for auto_save feature
-mutable struct HPRLP_saved_state_gpu
+mutable struct HPRLP_saved_state_gpu <: HPRLP_saved_state
     # Best x found so far (GPU)
     save_x::CuVector{Float64}
     
     # Best y found so far (GPU)
     save_y::CuVector{Float64}
     
+    # Best z found so far (GPU)
+    save_z::CuVector{Float64}
+
     # Best sigma value
     save_sigma::Float64
     
@@ -292,16 +301,19 @@ mutable struct HPRLP_saved_state_gpu
     HPRLP_saved_state_gpu() = new()
 end
 
-mutable struct HPRLP_saved_state_cpu
+mutable struct HPRLP_saved_state_cpu <: HPRLP_saved_state
     # Best x found so far (CPU)
     save_x::Vector{Float64}
     
     # Best y found so far (CPU)
     save_y::Vector{Float64}
     
+    # Best z found so far (CPU)
+    save_z::Vector{Float64}
+
     # Best sigma value
     save_sigma::Float64
-    
+
     # Iteration when best state was saved
     save_iter::Int
     

@@ -452,6 +452,7 @@ function compute_residuals_gpu!(ws::HPRLP_workspace_gpu,
         if iter == 0 || res.KKTx_and_gap_org_bar < max(ws.saved_state.save_err_Rp, ws.saved_state.save_err_Rd, ws.saved_state.save_rel_gap)
             ws.saved_state.save_x .= ws.x_bar
             ws.saved_state.save_y .= ws.y_bar
+            ws.saved_state.save_z .= ws.z_bar
             ws.saved_state.save_sigma = ws.sigma
             ws.saved_state.save_iter = iter
             ws.saved_state.save_err_Rp = res.err_Rp_org_bar
@@ -514,6 +515,7 @@ function compute_residuals_cpu!(ws::HPRLP_workspace_cpu,
         if iter == 0 || res.KKTx_and_gap_org_bar < restart_info.best_gap
             ws.saved_state.save_x .= ws.x_bar
             ws.saved_state.save_y .= ws.y_bar
+            ws.saved_state.save_z .= ws.z_bar
             ws.saved_state.save_sigma = ws.sigma
             ws.saved_state.save_iter = iter
             ws.saved_state.save_err_Rp = res.err_Rp_org_bar
@@ -704,6 +706,10 @@ function collect_results_gpu!(
     results.x .= sc.b_scale * Vector(ws.x_bar ./ sc.col_norm)
     results.y .= sc.c_scale * Vector(ws.y_bar ./ sc.row_norm)
     results.z .= sc.c_scale * Vector(ws.z_bar .* sc.col_norm)
+    ws.saved_state.save_x .= sc.b_scale * (ws.saved_state.save_x ./ sc.col_norm)
+    ws.saved_state.save_y .= sc.c_scale * (ws.saved_state.save_y ./ sc.row_norm)
+    ws.saved_state.save_z .= sc.c_scale * (ws.saved_state.save_z .* sc.col_norm)
+    results.saved_state = ws.saved_state
 
     results.status = status
     # Set tolerance results, using final values if threshold not reached
@@ -752,6 +758,10 @@ function collect_results_cpu!(
     results.x .= sc.b_scale * (ws.x_bar ./ sc.col_norm)
     results.y .= sc.c_scale * (ws.y_bar ./ sc.row_norm)
     results.z .= sc.c_scale * (ws.z_bar .* sc.col_norm)
+    ws.saved_state.save_x .= sc.b_scale * (ws.saved_state.save_x ./ sc.col_norm)
+    ws.saved_state.save_y .= sc.c_scale * (ws.saved_state.save_y ./ sc.row_norm)
+    ws.saved_state.save_z .= sc.c_scale * (ws.saved_state.save_z .* sc.col_norm)
+    results.saved_state = ws.saved_state
 
     results.status = status
     # Set tolerance results, using final values if threshold not reached
@@ -786,6 +796,17 @@ function collect_empty_model_results(
     results.x = Float64[]
     results.y = Float64[]
     results.z = Float64[]
+    results.saved_state = HPRLP_saved_state_cpu()
+    results.saved_state.save_x = Float64[]
+    results.saved_state.save_y = Float64[]
+    results.saved_state.save_z = Float64[]
+    results.saved_state.save_sigma = 1.0
+    results.saved_state.save_iter = 0
+    results.saved_state.save_err_Rp = 0.0
+    results.saved_state.save_err_Rd = 0.0
+    results.saved_state.save_primal_obj = model.obj_constant
+    results.saved_state.save_dual_obj = model.obj_constant
+    results.saved_state.save_rel_gap = 0.0
     results.iter = 0
     results.iter_4 = 0
     results.iter_6 = 0
@@ -1013,6 +1034,7 @@ function allocate_workspace_gpu(lp::LP_info_gpu, scaling_info::Scaling_info_gpu,
     ws.saved_state = HPRLP_saved_state_gpu()
     ws.saved_state.save_x = CUDA.zeros(Float64, n)
     ws.saved_state.save_y = CUDA.zeros(Float64, m)
+    ws.saved_state.save_z = CUDA.zeros(Float64, n)
     ws.saved_state.save_sigma = ws.sigma
     ws.saved_state.save_iter = 0
     ws.saved_state.save_err_Rp = Inf
@@ -1104,6 +1126,7 @@ function allocate_workspace_cpu(lp::LP_info_cpu, scaling_info::Scaling_info_cpu,
     ws.saved_state = HPRLP_saved_state_cpu()
     ws.saved_state.save_x = Vector(zeros(n))
     ws.saved_state.save_y = Vector(zeros(m))
+    ws.saved_state.save_z = Vector(zeros(n))
     ws.saved_state.save_sigma = ws.sigma
     ws.saved_state.save_iter = 0
     ws.saved_state.save_err_Rp = Inf
@@ -1118,8 +1141,8 @@ end
 # the function to save current state to HDF5 file
 # This function is called whenever the log is printed (if auto_save is enabled)
 # It saves:
-#   - Current solution (x_bar, y_bar) - scaled to original problem
-#   - Best solution so far (save_x, save_y) - scaled to original problem
+#   - Current solution (x_bar, y_bar, z_bar) - scaled to original problem
+#   - Best solution so far (save_x, save_y, save_z) - scaled to original problem
 #   - Current and best sigma values
 #   - Current and best residuals, objectives, and iteration numbers
 #   - Current iteration number and elapsed time
@@ -1137,15 +1160,19 @@ function save_state_to_hdf5(
     if ws isa HPRLP_workspace_gpu
         x_bar = Vector(ws.x_bar)
         y_bar = Vector(ws.y_bar)
+        z_bar = Vector(ws.z_bar)
         save_x = Vector(ws.saved_state.save_x)
         save_y = Vector(ws.saved_state.save_y)
+        save_z = Vector(ws.saved_state.save_z)
         col_norm = Vector(sc.col_norm)
         row_norm = Vector(sc.row_norm)
     else
         x_bar = ws.x_bar
         y_bar = ws.y_bar
+        z_bar = ws.z_bar
         save_x = ws.saved_state.save_x
         save_y = ws.saved_state.save_y
+        save_z = ws.saved_state.save_z
         col_norm = sc.col_norm
         row_norm = sc.row_norm
     end
@@ -1153,8 +1180,10 @@ function save_state_to_hdf5(
     # Scale the variables (same as in collect_results)
     x_bar_scaled = sc.b_scale * (x_bar ./ col_norm)
     y_bar_scaled = sc.c_scale * (y_bar ./ row_norm)
+    z_bar_scaled = sc.c_scale * (z_bar .* col_norm)
     save_x_scaled = sc.b_scale * (save_x ./ col_norm)
     save_y_scaled = sc.c_scale * (save_y ./ row_norm)
+    save_z_scaled = sc.c_scale * (save_z .* col_norm)
 
     # Create or open HDF5 file
     if isfile(filename)
@@ -1169,6 +1198,7 @@ function save_state_to_hdf5(
         # Save current solution (scaled)
         file["current/x_org"] = x_bar_scaled
         file["current/y_org"] = y_bar_scaled
+        file["current/z_org"] = z_bar_scaled
         file["current/sigma"] = ws.sigma
 
         # Save current residuals
@@ -1181,6 +1211,7 @@ function save_state_to_hdf5(
         # Save best solution so far (scaled)
         file["best/x_org"] = save_x_scaled
         file["best/y_org"] = save_y_scaled
+        file["best/z_org"] = save_z_scaled
         file["best/sigma"] = ws.saved_state.save_sigma
         file["best/iteration"] = ws.saved_state.save_iter
 

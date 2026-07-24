@@ -12,6 +12,7 @@ All HPRLP solving functions return an `HPRLP_results` object with the following 
 | `x` | Vector{Float64} | Primal solution (decision variables) |
 | `y` | Vector{Float64} | Dual variables for constraints |
 | `z` | Vector{Float64} | Dual variables for bounds |
+| `saved_state` | HPRLP_saved_state | Best iterate saved by the solver |
 | `primal_obj` | Float64 | Primal objective value (``c^T x + c_0``) |
 | `iter` | Int | Total number of iterations |
 | `time` | Float64 | Total solve time (seconds) |
@@ -77,6 +78,11 @@ The dual variables for constraints.
 
 #### `z::Vector{Float64}`
 The dual variables for bound constraints (reduced costs).
+
+#### `saved_state::HPRLP_saved_state`
+The best iterate captured by the auto-save logic. It includes `save_x`, `save_y`,
+`save_z`, the corresponding iteration and step size, and the saved residual and
+objective metrics.
 
 ### Objective Values
 
