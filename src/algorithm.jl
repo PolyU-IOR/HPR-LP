@@ -284,22 +284,43 @@ function postsolve_and_validate_original_kkt!(
 
     postsolve_start = time()
     try
+        function postsolve_solution(x, y, z)
+            if presolve_state isa GPUPresolve.PresolveState
+                return GPUPresolve.run_postsolve(
+                    presolve_state,
+                    x,
+                    y,
+                    z;
+                    presolve_params=presolve_params,
+                )
+            elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
+                return PSLP.postsolve(presolve_state, x, y, z)
+            end
+            error("Unsupported presolve state type: $(typeof(presolve_state))")
+        end
+
         x_red = results.x isa Vector{Float64} ? results.x : Vector(results.x)
         y_red = results.y isa Vector{Float64} ? results.y : Vector(results.y)
         z_red = results.z isa Vector{Float64} ? results.z : Vector(results.z)
-        x_org, y_org, z_org = if presolve_state isa GPUPresolve.PresolveState
-            GPUPresolve.run_postsolve(
-                presolve_state,
-                x_red,
-                y_red,
-                z_red;
-                presolve_params=presolve_params,
+        x_org, y_org, z_org = postsolve_solution(x_red, y_red, z_red)
+
+        if params.auto_save
+            save_x_org, save_y_org, save_z_org = postsolve_solution(
+                Vector(results.saved_state.save_x),
+                Vector(results.saved_state.save_y),
+                Vector(results.saved_state.save_z),
             )
-        elseif presolve_state isa Union{PSLP.PresolverModel,PSLP.RemotePresolverModel}
-            PSLP.postsolve(presolve_state, x_red, y_red, z_red)
-        else
-            error("Unsupported presolve state type: $(typeof(presolve_state))")
+            if results.saved_state isa HPRLP_saved_state_gpu
+                results.saved_state.save_x = CuVector(save_x_org)
+                results.saved_state.save_y = CuVector(save_y_org)
+                results.saved_state.save_z = CuVector(save_z_org)
+            else
+                results.saved_state.save_x = save_x_org
+                results.saved_state.save_y = save_y_org
+                results.saved_state.save_z = save_z_org
+            end
         end
+
         results.x = x_org
         results.y = y_org
         results.z = z_org

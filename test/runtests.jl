@@ -164,6 +164,7 @@ ENDATA
             model = HPRLP.build_from_Abc(A, c, AL, AU, l, u)
             params = make_test_params(use_gpu=true)
             params.presolve = "GPU"
+            params.auto_save = true
 
             result = HPRLP.optimize(model, params)
 
@@ -174,6 +175,12 @@ ENDATA
             @test length(result.x) == 1
             @test length(result.y) == 0
             @test length(result.z) == 1
+            @test length(result.saved_state.save_x) == 1
+            @test length(result.saved_state.save_y) == 0
+            @test length(result.saved_state.save_z) == 1
+            @test result.saved_state.save_x ≈ result.x
+            @test result.saved_state.save_y ≈ result.y
+            @test result.saved_state.save_z ≈ result.z
             @test isapprox(result.x[1], 1.0, atol=1e-8)
             @test isapprox(result.original_p_feas, 0.0, atol=1e-8)
             @test isapprox(result.original_d_feas, 0.0, atol=1e-8)
